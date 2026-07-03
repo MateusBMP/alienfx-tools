@@ -407,9 +407,24 @@ namespace AlienFX_SDK {
 			break;
 		case API_V4:
 		{
-			mods = { { 3, {c.r, c.g, c.b, 0, (byte)lights->size()} },
-				{8, *lights} };
-			val = PrepareAndSend(COMMV4_setOneColor, &mods);
+			// ToDo: Divide command for more, then 34-8 (26) lights!
+			//mods = { { 3, {c.r, c.g, c.b, 0, (byte)lights->size()} }, {8, *lights} };
+			byte pos = 8;
+			for (auto i = lights->begin(); i != lights->end(); i++) {
+				if (pos > 33) {
+					mods.push_back({ 3, {c.r, c.g, c.b, 0, 26} });
+					val = PrepareAndSend(COMMV4_setOneColor, &mods);
+					mods.clear();
+					pos = 8;
+					UpdateColors();
+					Reset();
+				}
+				mods.push_back({ pos++, {*i} });
+			}
+			if (pos > 8) {
+				mods.push_back({ 3, {c.r, c.g, c.b, 0, (byte)(pos - 8)} });
+				val = PrepareAndSend(COMMV4_setOneColor, &mods);
+			}
 		} break;
 		case API_V3: case API_V2: case API_V6: //case API_V9: 
 		case API_ACPI:
@@ -568,7 +583,6 @@ namespace AlienFX_SDK {
 #ifndef NOACPILIGHTS
 		case API_ACPI:
 			return ((AlienFan_SDK::Lights*)ACPIdevice)->SetColor(1 << act->index, act->act.front().r, act->act.front().g, act->act.front().b);
-			break;
 #endif
 		}
 		return false;
@@ -702,20 +716,30 @@ namespace AlienFX_SDK {
 		switch (version) {
 		case API_V8:
 			PrepareAndSend(COMMV8_setBrightness, { {2, {bright}} });
-			break;
+			return true;
 		case API_V5:
 			Reset();
 			PrepareAndSend(COMMV5_turnOnSet, { {4, {bright}} });
-			break;
+			return true;
 		case API_V4: {
 			int pos = 6;
-			vector<Afx_icommand> mods{ {3,{(byte)(0x64 - bright), 0, (byte)mappings->size()}}/*, { 6, idlist}*/ };
-			for (auto i = mappings->begin(); i < mappings->end(); i++)
+			vector<Afx_icommand> mods;// { { 3, { (byte)(0x64 - bright), 0, (byte)mappings->size() } }/*, { 6, idlist}*/ };
+			for (auto i = mappings->begin(); i < mappings->end(); i++) {
+				if (pos > 33) {
+					mods.push_back({ 3,{(byte)(0x64 - bright), 0, 28} });
+					PrepareAndSend(COMMV4_turnOn, &mods);
+					mods.clear();
+					pos = 6;
+				}
 				if (!i->flags || power) {
 					mods.push_back({ pos++, {(byte)i->lightid} });
 				}
-			PrepareAndSend(COMMV4_turnOn, &mods);
-			break;
+			}
+			if (pos > 6) {
+				mods.push_back({ 3,{(byte)(0x64 - bright), 0, (byte)(pos - 6)} });
+				PrepareAndSend(COMMV4_turnOn, &mods);
+			}
+			return true;
 		}
 		case API_V3: case API_V2:
 			if (!bright || !oldBr) {

@@ -97,7 +97,7 @@ BOOL CALLBACK WhiteBalanceDialog(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 		CreateToolTip(bSl, sTip3, activeDevice->white.b);
 		SendMessage(brSl, TBM_SETRANGE, true, MAKELPARAM(0, 255));
 		SendMessage(brSl, TBM_SETTICFREQ, 16, 0);
-		CreateToolTip(brSl, sTip3, activeDevice->brightness);
+		CreateToolTip(brSl, sTip4, activeDevice->brightness);
 		fxhl->TestLight(activeDevice, eLid, true, true);
 		RECT pRect;
 		GetWindowRect(GetDlgItem(dDlg, IDC_BUT_WHITE), &pRect);
@@ -122,8 +122,9 @@ BOOL CALLBACK WhiteBalanceDialog(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 					} else
 						if ((HWND)lParam == brSl) {
 							activeDevice->brightness = (BYTE)SendMessage((HWND)lParam, TBM_GETPOS, 0, 0);
-							SetSlider(sTip3, activeDevice->brightness);
-							conf->afx_dev.SetDeviceBrightness(activeDevice, 255, true);
+							SetSlider(sTip4, activeDevice->brightness);
+							conf->afx_dev.SetDeviceBrightness(activeDevice, activeDevice->brightness, true);
+							break;
 						}
 			fxhl->TestLight(activeDevice, eLid, true, true);
 		} break;
