@@ -53,7 +53,8 @@ enum COMMANDS {
 	highlevel = 11,
 	probe = 12,
 	status = 13,
-	loop = 14
+	loop = 14,
+	reset = 15
 };
 
 const COMMAND commands[]{
@@ -70,5 +71,6 @@ const COMMAND commands[]{
 	{COMMANDS::highlevel,"highlevel","switch to high-level SDK (LightFX)"},
 	{COMMANDS::probe,"probe","\t[l][d][,lights][,devID[,lightID]] - probe lights and set names"},
 	{COMMANDS::status,"status","\tshows devices, lights and zones id's and names"},
-	{COMMANDS::loop,"loop","\trepeat commands from start, until user press CTRL+c"}
+	{COMMANDS::loop,"loop","\trepeat commands from start, until user press CTRL+c"},
+	{COMMANDS::reset,"reset","\treset device (if supported)"},
 };

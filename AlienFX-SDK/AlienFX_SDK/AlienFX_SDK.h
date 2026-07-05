@@ -134,7 +134,7 @@ namespace AlienFX_SDK {
 
 		// Support function to send data to USB device
 		bool PrepareAndSend(const byte* command, vector<Afx_icommand> mods);
-		bool PrepareAndSend(const byte* command, vector<Afx_icommand> *mods = NULL);
+		//bool PrepareAndSend(const byte* command, vector<Afx_icommand> *mods = NULL);
 
 		// Add new light effect block for v8
 		inline void AddV8DataBlock(byte bPos, vector<Afx_icommand>* mods, Afx_lightblock* act);
@@ -169,6 +169,9 @@ namespace AlienFX_SDK {
 		string description; // device description
 
 		~Functions();
+
+		// Support function to send data to USB device
+		bool PrepareAndSend(const byte* command, vector<Afx_icommand>* mods = NULL);
 
 		// Initialize device
 		// If vid is 0 or absent, first device found into the system will be used, otherwise device with this VID only.

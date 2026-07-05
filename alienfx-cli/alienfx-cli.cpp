@@ -104,7 +104,7 @@ vector<AlienFX_SDK::Afx_action> ParseActions(vector<ARG>* args, int startPos) {
 
 int main(int argc, char* argv[])
 {
-	printf("alienfx-cli v9.6.1\n");
+	printf("alienfx-cli v9.6.1.2\n");
 	if (argc < 2)
 	{
 		printUsage();
@@ -383,6 +383,16 @@ int main(int argc, char* argv[])
 			} break;
 			case COMMANDS::loop:
 				cc = 1;
+				break;
+			case COMMANDS::reset:
+				if (devType) {
+					byte resetCommand[]{ 0x2, 0x3, 0xff };
+					for (auto& i : afx_map.fxdevs) {
+						if (i.present && i.dev->version == AlienFX_SDK::API_V4) {
+							printf("Reset %s\n", i.dev->PrepareAndSend(resetCommand) ? "successful." : "failed!");
+						}
+					}
+				}
 				break;
 			case -2:
 				printf("Unknown command %s\n", command.c_str());
