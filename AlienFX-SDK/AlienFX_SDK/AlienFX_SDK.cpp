@@ -589,7 +589,8 @@ namespace AlienFX_SDK {
 	}
 
 	void Functions::SaveLightsState(vector<Afx_lightblock>* act) {
-		UpdateColors();
+		if (inSet)
+			UpdateColors();
 		switch (version) {
 		case API_V4: {
 			PrepareAndSend(COMMV4_control, { { 4, {4,0,0x61} } });

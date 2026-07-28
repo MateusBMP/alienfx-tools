@@ -97,11 +97,13 @@ void OnLightSelChanged(HWND hwndDlg)
 	int oldTab = tabLightSel;
 	tabLightSel = TabCtrl_GetCurSel(hwndDlg);
 
+#ifndef _DEBUG
 	if (!conf->afx_dev.activeLights) {
 		ShowNotification(&conf->niData, "No lights defined", "Assign some lights first!");
 		tabLightSel = TAB_DEVICES;
 		TabCtrl_SetCurSel(hwndDlg, tabLightSel);
 	}
+#endif
 
 	if (!pHdr->hwndDisplay)
 		if (tabLightSel != TAB_DEVICES)
