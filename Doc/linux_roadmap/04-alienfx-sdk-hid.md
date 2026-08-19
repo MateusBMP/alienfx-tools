@@ -1,0 +1,432 @@
+# AlienFX-SDK: Light Protocol Reference and HID Port Plan
+
+This is the single most important doc in this roadmap — it's the full protocol
+reference an implementer needs so they never have to reverse-engineer
+`AlienFX_SDK.cpp`/`alienfx-controls.h` from scratch. Every packet layout below was
+extracted directly from those two files.
+
+## API version enum and detection
+
+`AlienFX-SDK/AlienFX_SDK/AlienFX_SDK.h:97-108`:
+
+```cpp
+enum Afx_Version {
+    API_ACPI = 0, //128           -- see the ACPI note at the end of this doc
+//  API_V9 = 9, //193             -- scaffolded, not implemented (new monitors)
+    API_V8 = 8, //65
+    API_V7 = 7, //65
+    API_V6 = 6, //65
+    API_V5 = 5, //64
+    API_V4 = 4, //34
+    API_V3 = 3, //12
+    API_V2 = 2, //9
+    API_UNKNOWN = -1
+};
+```
+
+API v1 was removed upstream ("Ancient notebooks — deprecated and removed",
+`AlienFX-SDK/README.md:17`). Do not resurrect it.
+
+**Detection is not a static VID/PID table** — it's `VID + HID OutputReportByteLength`,
+decided in `AlienFXProbeDevice` (`AlienFX_SDK.cpp:191-236`):
+
+```cpp
+length = caps.OutputReportByteLength;
+pid = attributes.ProductID;
+switch (vid = attributes.VendorID) {
+case 0x0d62: // Darfon
+    if (caps.Usage == 0xcc && !length) {       // note: OutputReportByteLength == 0
+        length = caps.FeatureReportByteLength;  // real size comes from feature report
+        version = API_V5;
+    }
+    break;
+case 0x187c: // Alienware
+    switch (length) {
+    case 9:  version = API_V2; break;
+    case 12: version = API_V3; break;
+    case 34: version = API_V4; break;
+    case 65: version = API_V6; break;
+    }
+    break;
+default:
+    if (length == 65)
+        switch (vid) {
+        case 0x0424: if (pid != 0x274c) version = API_V6; break; // Microchip (0x274c = hub, excluded)
+        case 0x0461: version = API_V7; break;                    // Primax (mice)
+        case 0x04f2: version = API_V8; break;                    // Chicony (external keyboards)
+        }
+}
+```
+
+| VID | Vendor | Device class | Versions seen |
+|---|---|---|---|
+| `0x187c` | Alienware | chassis/tron/power lights, monitors | V2, V3, V4, V6 |
+| `0x0d62` | Darfon | internal per-key RGB keyboards | V5 (feature reports only, `Usage == 0xcc`) |
+| `0x0424` | Microchip | monitors (excl. PID `0x274c`, a hub) | V6 |
+| `0x0461` | Primax | mice | V7 |
+| `0x04f2` | Chicony | external keyboards (AW410k/510k) | V8 |
+
+Enumeration path: `SetupDiGetClassDevs(GUID_DEVINTERFACE_HID, DIGCF_PRESENT |
+DIGCF_DEVICEINTERFACE)` → `SetupDiEnumDeviceInterfaces` → `CreateFile(DevicePath,
+GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE)` → `HidD_GetAttributes` /
+`HidD_GetPreparsedData` / `HidP_GetCaps` (`AlienFX_SDK.cpp:261-274` single device,
+`:926-969` `AlienFXEnumDevices` used by the GUI). Manufacturer/product strings via
+`HidD_GetManufacturerString`/`HidD_GetProductString` (`:243-252`). Comm timeouts
+`{100,0,0,10,200}` set at `:180,:252`.
+
+## The transport core: `PrepareAndSend`
+
+`AlienFX_SDK.cpp:95-146` is the single choke point every packet goes through:
+
+```cpp
+byte buffer[MAX_BUFFERSIZE];                          // MAX_BUFFERSIZE == 193
+memset(buffer, version == API_V6 ? 0xff : 0, length); // V6 pads with 0xFF, all others 0x00
+memcpy(buffer, command, command[0] + 1);               // command[0] is a LENGTH byte, not data
+buffer[0] = reportIDList[version];                     // report ID overwrites that length byte
+if (mods) for (auto i : *mods) memcpy(buffer + i.i, i.vval.data(), i.vval.size());
+
+switch (version) {
+case API_V2: case API_V3: case API_V4:
+    return HidD_SetOutputReport(devHandle, buffer, length);
+case API_V5:
+    return HidD_SetFeature(devHandle, buffer, length);
+case API_V6:
+    return WriteFile(devHandle, buffer, length, &written, NULL);
+case API_V7:
+    WriteFile(devHandle, buffer, length, &written, NULL);
+    return ReadFile(devHandle, buffer, length, &written, NULL);   // V7 always reads back
+case API_V8:
+    if (needV8Feature) { Sleep(4); res = HidD_SetFeature(...); Sleep(6); return res; }
+    else return WriteFile(devHandle, buffer, length, &written, NULL);
+}
+```
+
+Two structural facts to preserve exactly in a reimplementation:
+
+1. **Commands are `{len, b1, b2, ...}` templates**, where byte 0 is a *payload length*
+   that gets overwritten with the report ID before sending — it is never part of the
+   wire payload itself.
+2. **`Afx_icommand {int i; vector<byte> vval;}`** is "patch these bytes at absolute
+   buffer offset `i`". All packet construction in this SDK is offset-patching over a
+   template buffer, not building packets field-by-field. Preserve this model in the
+   Linux port — it's what makes `alienfx-controls.h`'s tables directly reusable.
+
+Report IDs and brightness scale, indexed by `Afx_Version`
+(`alienfx-controls.h:13-15`):
+
+```cpp
+//                          v0    1    2    3    4    5    6    7   8    9
+const byte    reportIDList[]{ 0,   2,   2,   2,   0,0xcc,   0,   0,  1,   0 };
+const byte brightnessScale[]{0xf,0x64,0x64,0x64,0x64,0xff,0x64,0x64,0xa,0x64};
+```
+
+Transport summary:
+
+| API | Size | Report ID | Write | Read/status |
+|---|---|---|---|---|
+| V2 | 9 | 2 | `SET_OUTPUT_REPORT` | `GET_INPUT_REPORT`, status in `buffer[0]` |
+| V3 | 12 | 2 | `SET_OUTPUT_REPORT` | same as V2 |
+| V4 | 34 | 0 | `SET_OUTPUT_REPORT` | `GET_INPUT_REPORT`, status in `buffer[2]` |
+| V5 | 64 | 0xcc | `SET_FEATURE` | `GET_FEATURE`, status in `buffer[2]` |
+| V6 | 65 | 0 | interrupt write (`WriteFile`) | none |
+| V7 | 65 | 0 | interrupt write **then** interrupt read | read result unused by caller |
+| V8 | 65 | 1 | `SET_FEATURE` for 1-byte cmds, interrupt write for data blocks | none |
+
+### hidraw / hidapi mapping
+
+The commented-out `DeviceIoControl` variants already in the source spell out the
+Linux ioctl equivalents directly — they were apparently a prior exploration of the raw
+approach:
+
+| Windows call | Commented alternative (`AlienFX_SDK.cpp`) | Linux hidraw ioctl | hidapi call |
+|---|---|---|---|
+| `HidD_SetFeature` | `:800` | `HIDIOCSFEATURE` | `hid_send_feature_report` |
+| `HidD_SetOutputReport` | `:116` | plain `write()` with report-ID-prefixed buffer | `hid_send_output_report` (or `hid_write` per below) |
+| `HidD_GetFeature` | `:806` | `HIDIOCGFEATURE` | `hid_get_feature_report` |
+| `HidD_GetInputReport` | `:815` | plain `read()` | `hid_get_input_report` |
+| `WriteFile` (interrupt) | `:120` | plain `write()` | `hid_write` |
+| `ReadFile` (interrupt) | — | plain `read()` | `hid_read` |
+
+**Recommended technique** (matches `tr1xem/alienfx-linux`, which already validated
+this against real hardware): don't rewrite `PrepareAndSend`'s switch statement at all.
+Reimplement the six Windows function names it calls
+(`HidD_SetFeature`/`HidD_SetOutputReport`/`WriteFile`/`ReadFile`/`HidD_GetFeature`/
+`HidD_GetInputReport`) as thin wrappers over `hidapi`, taking `hid_device*` instead of
+`HANDLE`:
+
+```cpp
+// libusb_helper.h (Linux only)
+bool HidD_SetFeature(hid_device* dev, uint8_t* buf, size_t len) {
+    return hid_send_feature_report(dev, buf, len) >= 0;
+}
+bool WriteFile(hid_device* dev, uint8_t* buf, size_t len) {
+    return hid_write(dev, buf, len) >= 0;
+}
+// ...HidD_GetFeature -> hid_get_feature_report, ReadFile -> hid_read, etc.
+```
+
+This keeps `alienfx-controls.h` and all of `PrepareAndSend`/`SetMaskAndColor`/etc.
+byte-for-byte identical between platforms — only the six function *definitions* and the
+`devHandle` type (`HANDLE` → `hid_device*`, `AlienFX_SDK.h:124`) change. Backend choice:
+`hidapi` supports both a `hidraw` backend (Linux-native, no libusb dependency, simpler
+udev rules) and a `libusb` backend (needed if any device requires control transfers
+hidapi's hidraw backend doesn't expose — V7's read-after-write and V8's mixed
+feature/interrupt pattern are both within plain hidapi's capability, so hidraw should
+suffice; keep libusb as a documented fallback if a specific device model proves
+otherwise). Decide the specific backend in implementation, not in this doc — verify
+against real V6/V7 hardware since those are the interrupt-transfer paths.
+
+`GetMaxPacketSize`-style endpoint introspection is only needed if a libusb backend is
+chosen (`tr1xem/alienfx-linux`'s `libusb_helper.cpp` includes one that walks
+`libusb_get_config_descriptor` for the `LIBUSB_TRANSFER_TYPE_INTERRUPT` IN endpoint) —
+skip it entirely if hidraw suffices.
+
+### Timing is not optional
+
+`Sleep()` calls in the protocol state machine
+(`AlienFX_SDK.cpp:134,136,771,829,832,845,852`) are real device handshake delays (2–20
+ms), not incidental Windows scheduling artifacts. Preserve them as `std::this_thread::sleep_for`
+verbatim — do not "optimize" them away, and do not assume the delays are safe to shorten
+without hardware to test against.
+
+## Per-version command tables
+
+### V2/V3 (9/12 bytes, old notebooks: m14x/17x, 13R1/R2)
+
+`alienfx-controls.h:17-43`:
+
+```cpp
+const byte COMMV1_color[]{ 1, 0x03 };      // [1] 1-3 effect type, [2] chain seq,
+                                             // [4-6] light mask, [rest] RGB, RGB2
+const byte COMMV1_loop[]{ 1, 0x04 };
+const byte COMMV1_update[]{ 1, 0x05 };
+const byte COMMV1_status[]{ 1, 0x06 };
+const byte COMMV1_reset[]{ 2, 0x07, 0x04 }; // [2]: 1 power&indicator, 2 sleep, 3 off, 4 on
+const byte COMMV1_saveGroup[]{ 1, 0x08 };
+const byte COMMV1_save[]{ 1, 0x09 };
+const byte COMMV1_setTempo[]{ 1, 0x0e };
+const byte COMMV1_apply[]{ 2, 0x1d, 0x03 };
+const byte COMMV1_dim[]{ 3, 0x1c, 0x64, 0x1 };  // [2] brightness, [3] 1=always/0=battery-only
+const byte v1OpCodes[]{ 3, 2, 1, 1, 1, 1, 1 };  // indexed by Action enum
+```
+
+Packet build (`AlienFX_SDK.cpp:24-89`, `SetMaskAndColor`): light selection is a
+**bitmask**, `1 << lightIndex` (or `~(1 << lightIndex)` for inverse selection). For
+V2/V3 the mask+opcode+chain go at offset 1 via `{1, {opcode, chain, mask.r, mask.g,
+mask.b}}` (colorcode union spreads the 24-bit mask across 3 bytes). Color:
+
+- **V3**: 6 raw bytes at offset 6 — `{c1.r, c1.g, c1.b, c2.r, c2.g, c2.b}` (full 8-bit).
+- **V2**: 3 packed bytes at offset 6 — 4 bits per channel:
+  ```cpp
+  {(c1.r&0xf0)|((c1.g&0xf0)>>4), (c1.b&0xf0)|((c2.r&0xf0)>>4), (c2.g&0xf0)|((c2.b&0xf0)>>4)}
+  ```
+
+`chain` is a sequence counter incremented after each `COMMV1_loop` send
+(`AlienFX_SDK.cpp:162,168,451,580`). Tempo/duration: `tempo<<3` and `time<<5`,
+big-endian 16-bit at offsets 2–5 of `COMMV1_setTempo` (`:564-569`).
+
+Handshake: `Reset()` sends `COMMV1_reset`, polls for status `ALIENFX_V2_READY (0x10)`
+(`AlienFX_SDK.h:15-17`, poll loop `WaitForReady` `:822-837`, up to 100×10ms);
+`UpdateColors()` sends `COMMV1_update`.
+
+Power-button lighting is a scripted 6-block sequence (`SavePowerBlock` `:148-176`,
+`SetPowerAction` `:678-705`): group `2` (AC sleep morph, saved twice with inverted
+mask), `5` (AC power color), `6` (charge morph), `7` (battery standby), `8` (battery),
+`9` (battery critical pulse).
+
+### V4 (34 bytes, "tron" — modern notebooks/desktops/Aurora R8+)
+
+`alienfx-controls.h:45-73`:
+
+```cpp
+const byte COMMV4_control[]{ 6, 0x03, 0x21, 0x00, 0x03, 0xff, 0xff };
+// [4] control type: 1 start-new, 2 finish+save, 3 finish+play, 4 remove,
+//                    5 play, 6 set-default, 7 set-startup
+// [5-6] control ID: 0xffff common, 8 startup, 61 light
+const byte COMMV4_colorSel[]{ 5, 0x03, 0x23, 0x01, 0x00, 0x01 };
+// [3] 1=loop 0=once; [5] light count; [6-33] light IDs (indices, NOT a bitmask)
+const byte COMMV4_colorSet[]{ 7, 0x03, 0x24, 0x00, 0x07, 0xd0, 0x00, 0xfa };
+// [3] action type (0 light,1 pulse,2 morph); [4] phase length;
+// [5] mode: d0 light, dc pulse, cf morph, e8 power-morph, 82 spectrum, ac rainbow;
+// [7] tempo (0xfa = steady); [8-10] rgb; up to 3 more phases at [11-17],[18-24],[25-31]
+const byte COMMV4_setPower[]{ 2, 0x03, 0x22 };
+const byte COMMV4_turnOn[]{ 2, 0x03, 0x26 };      // [4] brightness 0..100, [5] count, [6-33] IDs
+const byte COMMV4_setOneColor[]{ 2, 0x03, 0x27 }; // [3-5] rgb, [7] count, [8-33] IDs
+static byte v4OpCodes[]{ 0xd0, 0xdc, 0xcf, 0xdc, 0x82, 0xac, 0xe8 };
+```
+
+- Reset: `COMMV4_control` `[4]=4` (remove) then `[4]=1` (start new), `AlienFX_SDK.cpp:314-319`.
+- Update: bare `COMMV4_control` (template default `[4]=3`, finish+play), `:343-346`.
+- Bulk same-color: `SetMultiColor` (`:408-428`) — max **26 IDs per packet** (offsets
+  8..33), auto-chunks with Update+Reset between batches for more.
+- Per-light action: `SetV4Action` (`:505-520`) — `colorSel` with light index at offset
+  6, then up to 3 action phases of 8 bytes each starting at offset 3, stride 8.
+- Brightness: `COMMV4_turnOn`, **value is inverted**: `0x64 - brightness` at offset 3,
+  max 28 IDs/packet, `:725-744`.
+- Power button: 6 control IDs `0x5b..0x60` (AC sleep / AC power / charge / battery
+  sleep / battery power / battery critical), each wrapped
+  `setPower{4,0,cid}`/`{1,0,cid}`/`{2,0,cid}`, `:630-669`.
+- Profile save: control `{4,0,0x61}`, `{1,0,0x61}`, actions, `{2,0,0x61}`, `{6,0,0x61}`, `:595-603`.
+- Status codes: `ALIENFX_V4_READY=33 / BUSY=34 / WAITCOLOR=35 / WAITUPDATE=36 / WASON=38`
+  (`AlienFX_SDK.h:19-23`) — note a PID `0x551` quirk in `WaitForBusy` (`:849-850`), keep
+  it when porting `WaitForBusy`.
+- A hard reset packet `{0x2, 0x3, 0xff}` for V4 also appears directly in
+  `alienfx-cli/alienfx-cli.cpp:389` (the CLI's `reset` command) — keep this consistent
+  with the SDK's own reset sequence when porting the CLI ([07](07-alienfx-cli.md)).
+
+### V5 (64-byte feature reports, internal per-key RGB keyboards, VID `0x0d62`)
+
+`alienfx-controls.h:75-86`:
+
+```cpp
+const byte COMMV5_reset[]{ 1, 0x94 };
+const byte COMMV5_status[]{ 1, 0x93 };
+const byte COMMV5_colorSet[]{ 2, 0x8c, 0x02 };     // [2] can be 1,2,5,6,7,13
+const byte COMMV5_loop[]{ 2, 0x8c, 0x13 };
+const byte COMMV5_update[]{ 3, 0x8b, 0x01, 0xff };
+const byte COMMV5_turnOnSet[]{ 3, 0x83, 0x38, 0x9c };   // [4] brightness
+const byte COMMV5_setEffect[]{ 8, 0x80,0x02,0x07,0x00,0x00,0x01,0x01,0x01 };
+// [2] type, [3] tempo, [9] ncolors-1, [10..12] RGB1, [13..15] RGB2
+// types: 0 color,1 reset,2 breathing,3 single-wave,4 dual-wave,5-7 off,
+//        8 pulse,9 mix-pulse,a night-rider,b lazer
+```
+
+Color blocks are 4 bytes `{lightID+1, r, g, b}` starting at offset 4, stride 4, packed
+until `length` (`AddV5DataBlock` `:372-374`; loop at `:397-407`/`:481-491`), followed by
+`COMMV5_loop`. Status: send `COMMV5_status` then `HidD_GetFeature`, value in
+`buffer[2]` (`:796-802`); status codes `ALIENFX_V5_STARTCOMMAND=0x8c /
+WAITUPDATE=0x80 / INCOMMAND=0xcc` (`AlienFX_SDK.h:25-27`).
+
+### V6 (65-byte interrupt, monitors — VID `0x187c` or `0x0424`)
+
+`alienfx-controls.h:88-105`:
+
+```cpp
+const byte COMMV6_systemReset[]{ 4, 0x95,0,0,0 };
+const byte COMMV6_colorSet[]{ 2, 0x92, 0x37 };
+// [3] command length (a color, b pulse, f morph, 7 timing)
+// [6] command (87 color, 88 pulse, 8c morph/breath, 84 timing)
+// [8] command type (4 color, 1 morph, 2 pulse, 3 timing)
+// [9] light mask
+//   4,87 -> [10,11,12] RGB, [13] brightness 0..64, [14] checksum
+//   2,88 -> + [14] tempo, [15] checksum
+//   1,8c -> [10-12] RGB1, [13-15] RGB2, [16] brightness, [17,18] tempo, [19] checksum
+const byte v6OpCodes[]{ 0x87, 0x88, 0x8c,0x8c,0x8c,0x8c,0x8c };
+const byte v6TCodes[]{ 4, 2, 1, 1, 1, 1, 1 };
+```
+
+Build (`AlienFX_SDK.cpp:42-62`) computes an **XOR checksum** over the sent fields:
+
+```cpp
+*mods = { { 9, { (byte)index, c1.r, c1.g, c1.b } } };
+byte mask = (byte)(c1.r ^ c1.g ^ c1.b ^ index);
+// AlienFX_A_Color: mask ^= 8;                                    push {13,{bright,mask}}
+// AlienFX_A_Pulse: mask ^= byte(tempo^1);   {3,{0xb}},{6,{0x88}},{8,{2}},{13,{bright,tempo}},{15,{mask}}
+// AlienFX_A_Morph: mask ^= c2.r^c2.g^c2.b^tempo^4; {3,{0xf}},{6,{0x8c}},{8,{1}},{13,{c2 rgb}},{16,{bright,2,tempo,mask}}
+```
+
+Buffer is pre-filled `0xff` (see `PrepareAndSend`). **`SetBrightness` is a no-op for
+V6/V7**, returning `true` unconditionally (`:752-753`) — dimming for these devices must
+be done in software (scale RGB before sending), not hardware.
+
+### V7 (65-byte interrupt write + read, mice — VID `0x0461`)
+
+`alienfx-controls.h:107-113`:
+
+```cpp
+const byte COMMV7_update[]{ 8, 0x40,0x60,0x07,0x00,0xc0,0x4e,0x00,0x01 };
+const byte COMMV7_status[]{ 5, 0x40,0x03,0x01,0x00,0x01 };
+const byte COMMV7_control[]{ 5, 0x40,0x10,0x0c,0x00,0x01 };
+// [5] effect mode, [6] brightness, [7] lightID, [8..10] rgb1, [11..13] rgb2, ...
+static byte v7OpCodes[]{ 1,5,3,2,4,6,1 };
+```
+
+`SetAction` (`:533-541`) patches `{5, {opcode, bright, index}}` plus up to
+`(length-10)/3` RGB triplets at `count*3+8`. Every write is followed by a read
+(`:128-131`, part of `PrepareAndSend`'s V7 branch) — this is not optional, the device
+appears to require the read to complete the transaction.
+
+### V8 (65 bytes, external keyboards — VID `0x04f2`)
+
+`alienfx-controls.h:116-153`:
+
+```cpp
+const byte COMMV8_effectReady[]{ 3, 0x5, 0x01, 0x51 };
+// [2] chain no (0xff = reset), [3] effect type, [4-6] RGB1, [7-9] RGB2, [10] tempo,
+// [11] brightness, [12] chain length, [13] mode (1 permanent, 2 key-press),
+// [14] color mode (0/1 one-color, 2 two-color, 3 spectrum)
+const byte COMMV8_readyToColor[]{ 4, 0xe, 0x1, 0x0, 0x1 };
+// [2] lights in following blocks, [3] profile, [4] packet number within group
+// [5] light id, [6] effect (80 off,81 color,82 pulse,83 morph,84 default-blue,
+//     87 breath,88 spectrum), [7] tempo, [9] time, [10] brightness,
+// [11-13] RGB, [14-16] RGB2, [18] color count
+// up to 4 blocks/packet, repeating at [20-33],[35-48],[50-63]
+const byte COMMV8_setBrightness[]{ 1, 0x17 };   // [1] brightness 0..0xa
+const byte v8OpCodes[]{ 0x81, 0x82, 0x83, 0x87, 0x88, 0x84, 0x81 };
+```
+
+`AddV8DataBlock` (`:365-370`) emits 13 bytes: `{index, opcode, tempo, 0xa5, time, 0x0a,
+r,g,b, r2,g2,b2, 2}`, stride 15 starting at offset 5 (`:386,:473`), with the packet
+counter written at offset 4.
+
+`PrepareAndSend`'s V8 branch chooses transport by a size heuristic, not by command
+type: `needV8Feature = mods->front().vval.size() == 1` (`:110`) — single-byte patches
+(e.g. `COMMV8_setBrightness`) go via `SET_FEATURE`; multi-byte data blocks go via
+interrupt write. **Preserve this heuristic exactly** — it's fragile-looking but is what
+real hardware expects; don't "clean it up" into an explicit per-command transport table
+without testing against V8 hardware first.
+
+## Global effects (V5/V8 only)
+
+`AlienFX_SDK.cpp:764-785`; `IsHaveGlobal()` (`:1174-1177`) returns true only for V5/V8.
+V8 sends `COMMV8_effectReady` twice (bare, then with the 12-byte payload at offset 3),
+with a 20ms sleep between. V5 sends either `{2,{1,0xfe}}` (off) or
+`{2,{type,tempo}}` + `{9,{ncolors-1, RGB1, RGB2}}`, then `UpdateColors`.
+
+Effect-name/ID tables (UI-facing, `alienfx-gui/ProfilesDialog.cpp:28-45`):
+
+```cpp
+ge_names8[] = {"Off","Color or Morph","Pulse","Back Morph","Breath","Spectrum","One key (K)",
+  "Circle out (K)","Wave out (K)","Right wave (K)","Default","Rain Drop (K)","Wave",
+  "Rainbow wave","Circle wave","Random white (K)"};
+ge_names5[] = {"Off","Static","Breathing","Side Wave","Dual Wave","Pulse","Morph","Bounce","Laser","Rainbow"};
+const int ge_types8[]{0,1,2,3,7,8,9,10,11,12,13,14,15,16,17,18},
+          ge_types5[]{0,1,2,3,4,8,9,10,11,14};
+```
+
+`Doc/alienfx-cli.md` already documents the CLI-facing meaning of these — reuse that
+doc's wording verbatim for the ported CLI's `--help` text ([07](07-alienfx-cli.md)).
+
+## Mandatory operation order
+
+`Reset() → one or more SetAction/SetMultiColor/SetMultiAction calls → UpdateColors()`.
+`Reset` is implicit-if-needed for some call paths (`inSet` flag,
+`AlienFX_SDK.cpp:380,467,525`), but only V2–V5 actually *have* separate reset/update
+packets — V6/V7/V8 are stateless per-packet, so this ordering constraint is
+version-dependent. Any Linux reimplementation must preserve per-version statefulness,
+not impose a single state machine on all versions.
+
+## The ACPI light path (API v0) — do not port standalone
+
+`API_ACPI` exists only when `NOACPILIGHTS` is undefined (`AlienFX_SDK.h:6-8,187-191`)
+and only works if the v1 fan SDK's kernel driver is present — it's implemented as
+`AlienFan_SDK::Lights` inside `alienfan-tools/alienfan-SDK/alienfan-SDK.cpp:507-572`,
+not inside `AlienFX_SDK.cpp` itself. It's gated to a synthetic device ID
+`0x187c/0xffff` (`AlienFX_SDK.cpp:277-289`) and supports exactly 3 lights, 8-bit color,
+via 5 ACPI methods under `\_SB.AMW1`: `SRST` (reset), `ICPC`/`RCPC` (begin/end command),
+`SETC(r,g,b,mask)` (color), `SETB(mode,1)` (brightness 0–0xF). Only relevant on Aurora
+R6/R7 desktops (`AlienFX-SDK/README.md:16`). `tr1xem/alienfx-linux` marks this path
+"Not Planned". Treat it the same way here — a stretch goal after the fan SDK's ACPI
+fallback ([05](05-alienfan-sdk-thermal.md)) exists, never a milestone dependency, since
+it needs that fallback's ACPI call machinery anyway and serves very few desktop models.
+
+## Devices reference: `devices.csv`
+
+`alienfx-gui/Mappings/devices.csv` (1885 lines) is the closest thing to a device
+database in the project — light *names* and keyboard *grid geometry* for 28 known
+machines, keyed by VID/PID (decimal in the file). It does **not** replace live
+detection (`AlienFXProbeDevice`) — it only supplies human-readable names/positions
+after a device is already matched by VID+report-length. See
+[06](06-configuration-storage.md) for how this CSV should be carried into the Linux
+config format, and [16](16-testing-and-validation.md) for using its VID/PID list as a
+hardware validation matrix.
