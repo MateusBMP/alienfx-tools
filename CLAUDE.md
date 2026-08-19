@@ -78,6 +78,14 @@ those docs with new upstream/kernel/prior-art activity or reflect local implemen
 progress, use the `update-linux-roadmap` skill (`.claude/skills/update-linux-roadmap/`)
 rather than re-deriving the roadmap from scratch.
 
+Hardware-specific test coverage for the machine you're working on lives in
+`Doc/linux_roadmap/local/test-machine.md`. That file is intentionally **not versioned**
+(ignored via `.git/info/exclude`, so it's absent on a fresh clone). **If it doesn't
+exist, run the `probe-test-machine` skill (`.claude/skills/probe-test-machine/`) to
+generate it** before doing Linux porting or test work — it records which HID API
+version(s), fan backend, and roadmap subsystems the current machine can actually
+exercise versus what must stay golden-vector-only.
+
 ## Working agreements
 
 - Don't modify the Windows build (`.sln`/`.vcxproj`, `#pragma comment(lib` link lists,
