@@ -73,21 +73,122 @@ not the anon-struct warning) — recorded in 03 as a flagged item for M2, since
 
 ## M2 — HID light SDK port
 
-**Goal**: `AlienFX_SDK` builds and runs on Linux, controlling real hardware for at
-least one device per API version (v2–v8).
-**Doc**: [04](04-alienfx-sdk-hid.md).
-**Exit criteria**: golden-byte-vector tests ([16](16-testing-and-validation.md)) pass
-for all 7 versions' command builders; at least one real device validated per version.
-**Size**: ~1,500 lines touched (`AlienFX_SDK.cpp`/`.h`, new hidapi shim layer per the
-`tr1xem/alienfx-linux` technique), `alienfx-controls.h` unchanged.
-**Risk**: medium — the V8 feature/interrupt heuristic and V7's write-then-read
-requirement are the two spots most likely to need real-hardware iteration; budget
-extra validation time for these two versions specifically.
+**Split into five sub-milestones (M2a–M2e).** The milestone as originally scoped had a
+single exit bar — "golden-byte-vector tests pass for all 7 versions... at least one real
+device validated per version" — that bundled four problems with unrelated blocker
+profiles: does the protocol code compile on Linux, did the port change any bytes, does a
+Linux device get detected at all, and does it work against physical hardware. Only the
+last one is genuinely blocked (no Windows machine exists to capture reference vectors,
+and this fork's only test machine has one usable light controller, API_V4 — see
+[local/test-machine.md](local/test-machine.md)). The original wording made the whole
+milestone unable to be called done for reasons that have nothing to do with whether the
+port is correct. Splitting decouples "provably didn't change the bytes" (achievable now,
+on this machine, for all 7 versions) from "bytes are right for hardware" (gated on
+testers/a Windows machine, tracked per-version instead of blocking everything).
+**Doc**: [04](04-alienfx-sdk-hid.md), particularly its "Functions vs. Mappings" split and
+the M2a–M2e map.
+
+`AlienFX_SDK.cpp` splits cleanly along an existing class boundary: `Functions`
+(`:24-890`, `:1174-1177`) is the HID protocol state machine and is what M2 ports.
+`Mappings` (`:893-1172`) is registry-backed light-name/grid persistence with 37
+`Reg*`/`HKEY`/`SetupDi` references — that's [M4](06-configuration-storage.md)'s scope, not
+M2's, and `Functions` has zero references into it. This also means the three
+brace-elision call sites M1 flagged as an M2 hand-off
+(`tests/alienfx_sdk/sdk_headers_test.cpp:133-168`, `AlienFX_SDK.cpp:918,999,1077`) are all
+inside `Mappings` — they move to M4's ledger, not M2's.
+
+### M2a — Characterization baseline
+
+**Goal**: `Functions` (the HID protocol half only — `Mappings` deferred to M4) compiles
+on Linux against a recording fake transport, with byte-identical output frozen for every
+packet builder across all 7 API versions, *before* any porting of the real transport or
+device enumeration happens.
+**Exit criteria**: `Functions` compiles under all 5 `CMakePresets.json` presets with
+`-Werror`; golden vectors ([16](16-testing-and-validation.md)'s `source-derived` tier)
+exist for the full version × operation matrix (~55 cases); `ctest` green; a deliberately
+flipped byte in `alienfx-controls.h` makes the corresponding test fail (vectors are
+load-bearing, not decorative); no line of the pre-M2a file is deleted
+(`git diff -U0 c35002c -- AlienFX_SDK.cpp | grep '^-[^-]'` empty, same convention M1 used)
+— `Mappings` and SetupAPI enumeration are wrapped in `#ifdef _WIN32`, not rewritten.
+**Size**: ~400 lines new (`hid_backend.h` seam, `tests/support/*`, packet-builder +
+protocol-invariant tests), 0 lines of `AlienFX_SDK.cpp`/`.h` deleted.
+**Risk**: low — pure computation, no hardware or Windows dependency once the 6 transport
+calls are factored behind `hid_backend.h`.
+
+### M2b — hidapi transport backend
+
+**Goal**: the six Windows HID functions (`HidD_SetOutputReport`/`SetFeature`/`GetFeature`,
+`WriteFile`, `ReadFile`, `HidD_GetInputReport`) reimplemented as thin wrappers over
+`hidapi-hidraw`, per [04](04-alienfx-sdk-hid.md)'s mapping table — `PrepareAndSend` and
+all packet-construction code stay byte-identical. Includes the `--dry-run` transport
+[16](16-testing-and-validation.md) asks for.
+**Exit criteria**: M2a's golden tests pass unchanged when driven through the real hidapi
+backend over a loopback/mock hidraw node; `--dry-run` prints a decoded packet.
+**Size**: ~200 lines (`hid_backend_linux.cpp`, CMake `hidapi` dependency via
+`alienfx_require_package()`).
+**Risk**: low — mechanical once M2a's seam exists; the CMake gotcha already flagged in
+`cmake/AlienfxDependency.cmake:50-54` (hidapi's own `cmake_minimum_required` floor) is the
+only known snag.
+
+### M2c — Linux enumeration & detection
+
+**Goal**: replace SetupAPI device enumeration (`AlienFXProbeDevice`, `AlienFXInitialize`)
+with udev/hidraw enumeration. Fixes **Finding 1**
+(`local/test-machine.md:28-54`): Linux HID report descriptors don't include the leading
+report-ID byte Windows' `OutputReportByteLength` counts, so this machine's 34-byte V4
+controller parses as 33 and is silently undetectable. **Fix is to normalise the parsed
+Report Count to the Windows convention (+1) before the version-lookup switch — not to add
+a `case 33`** (hidraw `write(2)` still expects the leading report-ID byte on the wire, so
+34 is genuinely correct).
+**Exit criteria**: `187c:0550` on the test machine resolves to `API_V4`; a regression test
+asserts VID `0x187c` + parsed Report Count 33 → `API_V4`. First M2 sub-milestone that is
+**not** purely additive to `AlienFX_SDK.cpp` — add a row to
+[18-windows-verification.md](18-windows-verification.md).
+**Size**: ~300 lines (udev enumeration, the report-count fix, detection tests).
+**Risk**: low-medium — the fix itself is a one-line normalization, but enumeration
+replacement touches code with real device-safety consequences if done carelessly.
+
+### M2d — API_V4 live hardware validation
+
+**Goal**: actually drive lights on real API_V4 hardware end to end.
+**Exit criteria**: reset → set colour → update visibly changes lights; the 8 named
+lights from `alienfx-gui/Mappings/devices.csv:127-141` individually addressable;
+works non-root via group membership (pulls the udev rule design forward from
+[15](15-packaging-and-permissions.md) — per `local/test-machine.md:159-164`, this is
+"prerequisite work for a usable M2 exit, not later polish", since every light operation
+on the test machine currently requires root).
+**Size**: ~100 lines (udev rule, smoke-test script) — small because it's validation of
+M2a–M2c, not new protocol code.
+**Risk**: low — the risk already lives in M2a–M2c; this milestone is where it either pays
+off or doesn't.
+
+### M2e — API_V5 collection-aware detection (deferrable)
+
+**Goal**: resolve **Finding 2** (`local/test-machine.md:56-87`) — Windows evaluates V5
+detection (`OutputReportByteLength == 0 && Usage == 0xcc`) per top-level HID collection,
+but Linux hidraw exposes a composite device's entire interface as one node, so a literal
+port never detects V5. This needs a deliberate design decision (e.g. enumerate sibling
+hidraw nodes by USB interface/collection), not a mechanical port. Also worth weighing:
+`devices.csv:130` marks this machine's exact Darfon device "Unused", so "detect but don't
+drive this specific model" is a legitimate resolution, not a cop-out.
+**Exit criteria**: a written detection design, and either working V5 detection or an
+explicit recorded decision not to drive the tested device.
+**Size**: small-medium, mostly design time.
+**Risk**: low — can slip indefinitely without blocking M3, since M3's "prove the chain
+works" milestone only needs one working version (V4, from M2d).
+
+### Cross-cutting: the per-version hardware ledger
+
+V2/V3/V6/V7/V8 exit M2 code-complete and golden-green (M2a) but hardware-unvalidated —
+this fork's only test machine cannot reach them at all. That's a standing state to track
+continuously, not a step to complete, so it lives in
+[19-hardware-validation.md](19-hardware-validation.md) rather than as an M2 sub-milestone.
 
 ## M3 — `alienfx-cli` (first usable Linux release)
 
 **Goal**: a working, shippable Linux binary — set light colors from the command line.
-**Doc**: [07](07-alienfx-cli.md). Depends on M1, M2, and a minimal slice of M4 (just
+**Doc**: [07](07-alienfx-cli.md). Depends on M1, M2a–M2d (M2e is not required — M3 only
+needs one working API version, and M2d delivers V4), and a minimal slice of M4 (just
 enough config storage for `probe`/mappings — full M4 scope not required).
 **Exit criteria**: matches the acceptance bar in [07](07-alienfx-cli.md) — probe, set,
 see lights change, end to end.
@@ -104,7 +205,9 @@ where new risk is introduced.
 corrupt), schema version field present.
 **Size**: ~600 lines of new code (roughly matching the combined size of
 `ConfigHandler.cpp` + `ConfigFan.cpp` + `ConfigMon.cpp` + `Mappings::Load/SaveMappings`
-being replaced).
+being replaced). Also owns the three brace-elision call sites M1 flagged
+(`AlienFX_SDK.cpp:918,999,1077`, inside `Mappings` — see M2's doc above) since they don't
+compile clean under `-Werror` and `Mappings` is this milestone's to rewrite, not M2's.
 **Risk**: low-medium — mostly straightforward, but the "don't replicate binary struct
 layout" discipline matters; get review on the schema before too much downstream code
 depends on it.

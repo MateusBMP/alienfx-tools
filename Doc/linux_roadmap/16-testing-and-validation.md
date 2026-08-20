@@ -32,10 +32,15 @@ the details below, kept in one place rather than duplicated here):
   `tests/CMakeLists.txt` declaring every test executable.
 - **Golden-vector format**: one file per case at `tests/golden/<target>/<case>.txt` —
   space-separated lowercase hex bytes, `#`-comments, first comment line recording
-  provenance (Windows-build commit SHA, VID/PID, API version, logical call). Decided
-  now because M0 sets conventions; not implemented until M2 actually has vectors to
-  store, captured per the procedure below and tracked as an open item in
-  [18-windows-verification.md](18-windows-verification.md).
+  provenance. M2a extends this (see `tests/README.md`, the authoritative copy) with an
+  optional leading transport token per line (`out`/`feat`/`write`/`read`/`getfeat`/
+  `getin`/`sleep <ms>`) as a strict superset — a bare hex line with no token is still
+  valid — because the bytes-only format cannot express a multi-packet sequence
+  (`SavePowerBlock` emits 6) or which transport call a packet went through, and two of
+  the four fragile spots ([04](04-alienfx-sdk-hid.md)'s V7 write-then-read and V8
+  feature-vs-interrupt heuristic) are specifically about *that*. The provenance comment
+  also grows an `origin=` field (`source-derived`/`hand-derived`/`hardware-captured`,
+  see below) alongside the existing SHA/VID/PID/version/call fields.
 - **Assertion style**: `EXPECT_NEAR` for float comparisons (e.g. FFT results);
   `EXPECT_THAT(actual, ElementsAreArray(expected, n))` for integral byte buffers, which
   reports index-level mismatches rather than dumping the whole buffer.
@@ -44,19 +49,63 @@ the details below, kept in one place rather than duplicated here):
 
 `AlienFX_SDK`'s offset-patch model ([04](04-alienfx-sdk-hid.md)) makes this cheap:
 every command is `template bytes + a list of (offset, bytes) patches`, and
-`PrepareAndSend` deterministically produces a final buffer from those inputs. Capture
-golden output buffers from the **existing Windows build** (instrument
-`PrepareAndSend` to dump `buffer[0..length)` before it hits `HidD_SetFeature`/etc., for
-a representative call of each API version's each command type) and assert the ported
-Linux code produces byte-identical output for the same logical calls. This validates
-the port without needing hardware for every test run, and pins down the exact
+`PrepareAndSend` deterministically produces a final buffer from those inputs. This
+validates the port without needing hardware for every test run, and pins down the exact
 behaviors flagged as fragile in [04](04-alienfx-sdk-hid.md) (the V8
-feature-vs-interrupt size heuristic, the V6 XOR checksum, the V2 4-bit color packing).
+feature-vs-interrupt size heuristic, the V6 XOR checksum, the V2 4-bit color packing,
+V7's write-then-read).
 
-Do the same for [05](05-alienfan-sdk-thermal.md)'s Backend B ACPI call encoding (the
-4-byte `{sub, arg1, arg2, 0}` buffer) — golden values are easy to produce since the
-existing v1 SDK's `RunMainCommand` escape hatch can dump the exact buffer it sends for
-known operations.
+### Vector provenance: three tiers, not one
+
+This doc originally specified a single source for golden vectors — an instrumented
+Windows build dumping `buffer[0..length)` before `HidD_SetFeature`/etc. That source is
+real (see [18-windows-verification.md](18-windows-verification.md)) but **permanently
+unavailable** to a Linux-only developer, and gating M2 on it stalls the entire milestone
+indefinitely for no reason connected to whether the port is correct — see
+[17-milestones.md](17-milestones.md)'s M2 split. Packet construction is pure
+computation with no hardware or Windows dependency once the six transport calls are
+factored behind a seam (`hid_backend.h`, M2a), so two more sources of ground truth are
+available *today*, and all three now coexist as tiers with different guarantees:
+
+| Tier | Source | Proves | Available |
+|---|---|---|---|
+| `source-derived` | Run the **current, unmodified** packet builders on Linux against a recording fake transport (M2a's `tests/support/fake_hid.*` + `gen_golden`), freeze the output once, commit it | The port did not change the bytes | Now, all 7 API versions |
+| `hand-derived` | Expected bytes computed independently in the test itself, from `alienfx-controls.h`'s constants and this doc's formulas — no dependency on any builder's output | The bytes are correct, independent of the implementation | Now, for the 4 fragile spots named above (`tests/alienfx_sdk/protocol_invariants_test.cpp`) |
+| `hardware-captured` | Instrumented Windows build talking to real hardware | The bytes are what the physical device actually wants | Whenever a Windows-capable contributor performs the ledger row in [18](18-windows-verification.md) |
+
+Say the limitation plainly rather than gloss over it: a `source-derived` vector and the
+code under test can share a pre-existing bug in `AlienFX_SDK.cpp`/`alienfx-controls.h` —
+it proves "the port is faithful to the source", never "the source is correct". That's
+exactly why the `hand-derived` tier exists for the four spots most likely to hide a real
+bug, and why `hardware-captured` is designed as an **upgrade that replaces a vector file
+in place** (same path, same case name) rather than a separate thing M2 additionally
+waits on — nothing about the test structure changes when a hardware capture becomes
+available, only the file's provenance comment and its contents.
+
+### The recording fake transport (M2a)
+
+`tests/support/fake_hid.{h,cpp}` implements the same six symbols `hid_backend.h`
+declares (`HidD_SetOutputReport`/`SetFeature`/`GetFeature`, `WriteFile`, `ReadFile`,
+`HidD_GetInputReport`), plus `Sleep`, but instead of talking to a device it appends each
+call to an ordered log of `{transport kind, bytes, length}` (or a `sleep <ms>` entry) and
+returns success. Because `PrepareAndSend` (`AlienFX_SDK.cpp:95-146`) is the single choke
+point every packet goes through, this one fake is sufficient to observe every builder's
+output for every API version without a real `hid_device*` or root access. A second
+requirement it must meet: `Reset()` on API v1–v4 polls `GetDeviceStatus()` via
+`WaitForReady`/`WaitForBusy` (`AlienFX_SDK.cpp:822-852`, up to 100–500 iterations) — the
+fake returns a ready status on the first poll so the test suite stays fast, not because
+polling behavior itself is being tested here.
+
+`tests/support/gen_golden.cpp` is a small executable, run by hand and **not** wired into
+`ctest`, that drives every case in the shared `packet_matrix` table against the fake and
+writes `tests/golden/alienfx_sdk/<case>.txt`. Golden vectors are committed artifacts —
+running `gen_golden` again should reproduce them byte-for-byte (an empty `git diff`),
+proving the generator is deterministic; it is not part of the build or test loop.
+
+Do the same three-tier approach for [05](05-alienfan-sdk-thermal.md)'s Backend B ACPI
+call encoding (the 4-byte `{sub, arg1, arg2, 0}` buffer) — golden values are easy to
+produce since the existing v1 SDK's `RunMainCommand` escape hatch can dump the exact
+buffer it sends for known operations, once a Windows machine is available.
 
 ## A `--dry-run` transport for manual testing without hardware
 
@@ -75,10 +124,13 @@ tooling capture what a specific CLI invocation actually sends for a bug report.
 matrix for release validation. It won't be feasible to physically test every entry
 before every release; instead:
 
-- Maintain a living compatibility table (separate from this roadmap, updated as the
-  port progresses) recording which entries have been validated against the Linux
-  build, by whom, and on what kernel version (relevant for the fan-backend allowlist
-  question in [05](05-alienfan-sdk-thermal.md)).
+- Maintain a living compatibility table recording which entries have been validated
+  against the Linux build, by whom, and on what kernel version (relevant for the
+  fan-backend allowlist question in [05](05-alienfan-sdk-thermal.md)). This is now a
+  concrete document rather than an aspiration:
+  [19-hardware-validation.md](19-hardware-validation.md) is the light-SDK instance of
+  it (the Linux counterpart to [18](18-windows-verification.md)'s Windows-side ledger);
+  `local/test-machine.md` is that table's first populated entry, per its own header.
 - Prioritize validation coverage across API *versions* (v2 through v8) over exhaustive
   per-model coverage within a version — a working V4 implementation on one m-series
   notebook is strong evidence for every other V4 device, but doesn't validate V5's

@@ -5,6 +5,44 @@ reference an implementer needs so they never have to reverse-engineer
 `AlienFX_SDK.cpp`/`alienfx-controls.h` from scratch. Every packet layout below was
 extracted directly from those two files.
 
+## `Functions` vs. `Mappings`: what M2 actually ports
+
+`AlienFX_SDK.cpp` (1177 lines) is two unrelated classes, not one. This determines M2's
+scope directly:
+
+| Region | Class | What it does | Windows-only calls | Owner |
+|---|---|---|---|---|
+| `:24-890`, `:1174-1177` | `Functions` | The HID protocol state machine below — device init, packet construction, transport | 6 HID functions + `Sleep` in `PrepareAndSend`/`GetDeviceStatus` (`:95-146`, `:787-820`); SetupAPI only in `AlienFXProbeDevice`/`AlienFXInitialize` (`:178-275`) | **M2** |
+| `:893-1172` | `Mappings` | Registry-backed light-name and grid persistence (`Load/SaveMappings`, device list bookkeeping) | 37 `Reg*`/`HKEY`/`SetupDi`/`CloseHandle` references | [M4](06-configuration-storage.md) |
+
+`Functions` has zero references into `Mappings`, `HKEY`, or `Reg*` — the split is a plain
+`#ifdef _WIN32` wrap, not a rewrite. One consequence worth calling out because it
+corrects an M1 hand-off note: `tests/alienfx_sdk/sdk_headers_test.cpp:133-168` flagged
+three brace-elision call sites (`AlienFX_SDK.cpp:918,999,1077`) that don't compile clean
+under `-Werror` as something "M2 must fix". All three are inside `Mappings`
+(`AlienFxUpdateDevice`, `AddDeviceById`, `LoadMappings`) — they move to M4's scope. This
+is also why M2's first sub-milestone can be **purely additive** to the pre-existing file
+(no line deleted) despite compiling `AlienFX_SDK.cpp` on Linux for the first time: the
+part that needed non-additive rewriting to compile clean isn't part of M2 at all.
+
+## M2's sub-milestones, mapped onto this doc
+
+See [17-milestones.md](17-milestones.md) for the full goal/exit/size/risk breakdown of
+each; this is the short version of *where in this doc* each one lives:
+
+| Sub-milestone | What | Where in this doc |
+|---|---|---|
+| **M2a** | Compile `Functions` behind a recording fake transport; freeze `source-derived` golden vectors for all 7 versions; `hand-derived` tests for the 4 fragile spots | "The transport core", all seven "Per-version command tables" subsections, "Timing is not optional" |
+| **M2b** | Real `hidapi-hidraw` transport backend + `--dry-run` | "hidraw / hidapi mapping" |
+| **M2c** | udev/hidraw enumeration; fixes the 33-vs-34 report-length bug | "API version enum and detection" |
+| **M2d** | Live API_V4 validation | N/A — hardware step, see `local/test-machine.md` |
+| **M2e** | V5 collection-aware detection design | "API version enum and detection", the V5/Darfon row |
+
+The four spots this doc and [16](16-testing-and-validation.md) call fragile — the V8
+feature-vs-interrupt size heuristic, the V6 XOR checksum, the V2 4-bit color packing, and
+V7's write-then-read requirement — are each called out in their per-version subsection
+below and are exactly what M2a's `hand-derived` tests target.
+
 ## API version enum and detection
 
 `AlienFX-SDK/AlienFX_SDK/AlienFX_SDK.h:97-108`:
@@ -65,6 +103,25 @@ default:
 | `0x0424` | Microchip | monitors (excl. PID `0x274c`, a hub) | V6 |
 | `0x0461` | Primax | mice | V7 |
 | `0x04f2` | Chicony | external keyboards (AW410k/510k) | V8 |
+
+**Two confirmed Linux porting defects in this switch, found by probing real hardware**
+(`local/test-machine.md`, both are **M2c**'s to fix, not M2a's):
+
+- **Finding 1 (`local/test-machine.md:28-54`)**: `caps.OutputReportByteLength` on Windows
+  *includes* the leading report-ID byte; a Linux HID report descriptor's Report Count
+  does not when the device has no `85 xx` Report ID item. A real 34-byte V4 controller
+  (this fork's test machine: `187c:0550`) therefore parses as 33 on Linux, matches no
+  `case` above, and is silently left at `API_UNKNOWN` — no error, no lights. **Fix: add 1
+  to the parsed Report Count before this switch to normalize to the Windows convention,
+  not add a `case 33`** — hidraw `write(2)` still expects the leading report-ID byte on
+  the wire, so 34 remains the true on-wire size either way.
+- **Finding 2 (`local/test-machine.md:56-87`)**: the Darfon `case 0x0d62` condition is
+  evaluated by Windows *per top-level HID collection* (each gets its own device
+  interface path there), but Linux hidraw exposes a whole composite interface as one
+  node — including sibling collections (e.g. the boot-keyboard LED output report) that
+  make `OutputReportByteLength == 0` false even when the vendor-usage V5 collection is
+  present. A literal port never detects V5. Needs a deliberate redesign (M2e), not a
+  mechanical translation of this condition.
 
 Enumeration path: `SetupDiGetClassDevs(GUID_DEVINTERFACE_HID, DIGCF_PRESENT |
 DIGCF_DEVICEINTERFACE)` → `SetupDiEnumDeviceInterfaces` → `CreateFile(DevicePath,
@@ -180,6 +237,15 @@ against real V6/V7 hardware since those are the interrupt-transfer paths.
 chosen (`tr1xem/alienfx-linux`'s `libusb_helper.cpp` includes one that walks
 `libusb_get_config_descriptor` for the `LIBUSB_TRANSFER_TYPE_INTERRUPT` IN endpoint) —
 skip it entirely if hidraw suffices.
+
+**This same seam is what splits M2a from M2b.** `AlienFX-SDK/AlienFX_SDK/hid_backend.h`
+declares exactly these six symbols (plus `Sleep`) with signatures matching the existing
+call sites, so `PrepareAndSend`/`GetDeviceStatus` need no changes either way. M2a links
+`Functions` against `tests/support/fake_hid.cpp` — a backend that logs calls instead of
+touching a device, used to freeze golden vectors with no hidapi dependency and no
+hardware. M2b later adds `hid_backend_linux.cpp`, the real `hidapi-hidraw` implementation
+shown above; M2a's tests are the regression check that M2b's real backend still produces
+the exact same bytes.
 
 ### Timing is not optional
 

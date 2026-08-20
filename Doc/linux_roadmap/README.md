@@ -83,6 +83,14 @@ Full milestone breakdown with entry/exit criteria: 17 (milestones)
 
 See [`17-milestones.md`](17-milestones.md) for the actual milestone table (M0–M10) with
 sizes and risk notes — the diagram above is the dependency shape, not the schedule.
+**M2 itself is split into five sub-milestones (M2a–M2e)** — see 17's M2 section for why:
+its original single exit bar bundled "compiles on Linux", "the port didn't change the
+bytes", "a Linux device is detected at all", and "validated on physical hardware" into
+one criterion, and only the last of those is actually blocked (no Windows machine exists
+to capture reference vectors). Splitting lets M2a–M2c proceed now and tracks
+per-API-version hardware validation continuously in
+[19-hardware-validation.md](19-hardware-validation.md) instead of gating the whole
+milestone on it.
 
 ## Index
 
@@ -105,8 +113,9 @@ sizes and risk notes — the diagram above is the dependency shape, not the sche
 | [14-lightfx-library.md](14-lightfx-library.md) | `LightFX.dll` → `.so` emulator |
 | [15-packaging-and-permissions.md](15-packaging-and-permissions.md) | udev, kernel requirements, distro packaging |
 | [16-testing-and-validation.md](16-testing-and-validation.md) | Test strategy given zero existing tests |
-| [17-milestones.md](17-milestones.md) | The long roadmap: M0–M10 with entry/exit criteria |
+| [17-milestones.md](17-milestones.md) | The long roadmap: M0–M10 with entry/exit criteria (M2 split into M2a–M2e) |
 | [18-windows-verification.md](18-windows-verification.md) | Permanent ledger of tasks that need a Windows machine, since none is available to the current developer |
+| [19-hardware-validation.md](19-hardware-validation.md) | Permanent ledger of which API version × physical device combinations have been validated against the Linux build, since golden-vector-green isn't the same as hardware-validated |
 
 ## What we are explicitly not porting (yet)
 
