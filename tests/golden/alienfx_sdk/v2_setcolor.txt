@@ -1,0 +1,7 @@
+# origin=source-derived api=v2 call=v2_setcolor
+# NOT a hardware capture -- pins the current packet builder's output only. See Doc/linux_roadmap/16-testing-and-validation.md, "source-derived" tier.
+> out 02 07 04 00 00 00 00 00 00
+> out 02 06 00 00 00 00 00 00 00
+> getin 10 00 21 00 00 00 00 00 00
+> out 02 03 01 00 00 01 f0 00 00
+> out 02 04 00 00 00 00 00 00 00

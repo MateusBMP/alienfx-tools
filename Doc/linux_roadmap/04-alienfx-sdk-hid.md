@@ -295,10 +295,30 @@ Handshake: `Reset()` sends `COMMV1_reset`, polls for status `ALIENFX_V2_READY (0
 (`AlienFX_SDK.h:15-17`, poll loop `WaitForReady` `:822-837`, up to 100×10ms);
 `UpdateColors()` sends `COMMV1_update`.
 
-Power-button lighting is a scripted 6-block sequence (`SavePowerBlock` `:148-176`,
-`SetPowerAction` `:678-705`): group `2` (AC sleep morph, saved twice with inverted
+Power-button lighting is a scripted 6-block sequence (`SavePowerBlock`,
+`SetPowerAction`): group `2` (AC sleep morph, saved twice with inverted
 mask), `5` (AC power color), `6` (charge morph), `7` (battery standby), `8` (battery),
 `9` (battery critical pulse).
+
+**Pre-existing defect found by M2a's characterization testing, independent of the
+port**: `SavePowerBlock` (`AlienFX_SDK.cpp:212-240`) declares `group = {{2, {blID}}}`
+(one element) and passes `&group` to `PrepareAndSend` **five** times (`:214, :219,
+:224, :227, :230`) without ever repopulating it. `PrepareAndSend` always clears
+`*mods` after use (`:174`'s `mods->clear()`), so every call after the first passes an
+*empty* vector — and `PrepareAndSend`'s `needV8Feature = mods->front().vval.size() ==
+1` (`:174`) calls `.front()` on `*mods` whenever `mods` is non-null, **for every API
+version, not just V8**, with no emptiness check. The unconditional call at `:230` means
+this fires on *every* `SavePowerBlock` invocation regardless of the
+`needSecondary`/`needInverse` flags — i.e. every V2/V3 `SetPowerAction` and every
+V2/V3 `SaveLightsState` call that includes a non-empty light list. This is undefined
+behavior (silently reads garbage on MSVC release builds, which is presumably why it
+has gone unnoticed) and aborts outright under a hardened libstdc++
+(`vector::front(): assertion '!this->empty()' failed`) — which is how M2a's
+`tests/support/gen_golden` found it. **Not fixed as part of M2a** (a behavior change
+to shared, MSVC-authored code needs deliberate review, not a characterization-milestone
+side effect) — tracked by excluding V2/V3 from
+`tests/support/packet_matrix.cpp`'s `SetPowerAction`/`SaveLightsState` cases (see that
+file's comment) until it is.
 
 ### V4 (34 bytes, "tron" — modern notebooks/desktops/Aurora R8+)
 

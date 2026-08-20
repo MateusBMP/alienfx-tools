@@ -1,0 +1,9 @@
+# origin=source-derived api=v3 call=v3_setaction_pulse
+# NOT a hardware capture -- pins the current packet builder's output only. See Doc/linux_roadmap/16-testing-and-validation.md, "source-derived" tier.
+> out 02 07 04 00 00 00 00 00 00 00 00 00
+> out 02 06 00 00 00 00 00 00 00 00 00 00
+> getin 10 00 21 00 00 00 00 00 00 00 00 00
+> out 02 0e 00 50 00 00 00 00 00 00 00 00
+> out 02 04 00 00 00 00 00 00 00 00 00 00
+> out 02 02 01 00 00 01 00 ff 00 00 00 00
+> out 02 04 00 00 00 00 00 00 00 00 00 00

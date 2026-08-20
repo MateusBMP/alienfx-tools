@@ -1,0 +1,3 @@
+# origin=source-derived api=v3 call=v3_setbrightness
+# NOT a hardware capture -- pins the current packet builder's output only. See Doc/linux_roadmap/16-testing-and-validation.md, "source-derived" tier.
+> out 02 1c 4e 01 00 00 00 00 00 00 00 00

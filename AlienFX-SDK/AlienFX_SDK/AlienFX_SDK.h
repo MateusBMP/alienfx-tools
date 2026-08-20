@@ -49,6 +49,15 @@ namespace AlienFX_SDK {
 	#pragma GCC diagnostic ignored "-Wpedantic"
 	#ifdef __clang__
 	#pragma GCC diagnostic ignored "-Wgnu-anonymous-struct"
+	// Functions::ACPIdevice (below) is genuinely unused when NOACPILIGHTS is
+	// defined (every read/write of it lives in a `#ifndef NOACPILIGHTS` block in
+	// AlienFX_SDK.cpp) -- true on every Linux target in this tree, since the ACPI
+	// light path stays Windows-only (04-alienfx-sdk-hid.md's "do not port
+	// standalone"). The field itself must stay, in both #ifdef arms: removing it
+	// would change Functions' layout on the arm where NOACPILIGHTS *isn't*
+	// defined. Clang warns about this under -Wunused-private-field; GCC has no
+	// equivalent check.
+	#pragma GCC diagnostic ignored "-Wunused-private-field"
 	#endif
 #endif
 
@@ -287,6 +296,24 @@ namespace AlienFX_SDK {
 
 		// check global effects availability
 		bool IsHaveGlobal();
+
+#if !defined(_WIN32) && defined(ALIENFX_TESTING)
+		// Test-only seam (M2a). `devHandle` and `length` are private and normally
+		// only set by AlienFXProbeDevice/AlienFXInitialize -- both stubbed out
+		// until M2c ports Linux enumeration (see AlienFX_SDK.cpp). Golden-vector
+		// and protocol-invariant tests need to drive PrepareAndSend's packet
+		// builders directly, so this lets a test set up a Functions object as if
+		// probing had already succeeded, without waiting on M2c. ALIENFX_TESTING
+		// is defined only by the test targets in tests/CMakeLists.txt -- never by
+		// a real binary -- so this never reaches a shipped build on either
+		// platform. See Doc/linux_roadmap/04-alienfx-sdk-hid.md.
+		void TestSetDeviceState(HANDLE handle, int hidReportLength, WORD vidd = 0, WORD pidd = 0) {
+			devHandle = handle;
+			length = hidReportLength;
+			vid = vidd;
+			pid = pidd;
+		}
+#endif
 	};
 
 	struct Afx_device { // Single device data

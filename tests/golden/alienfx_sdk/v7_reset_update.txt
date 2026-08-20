@@ -1,0 +1,2 @@
+# origin=source-derived api=v7 call=v7_reset_update
+# NOT a hardware capture -- pins the current packet builder's output only. See Doc/linux_roadmap/16-testing-and-validation.md, "source-derived" tier.

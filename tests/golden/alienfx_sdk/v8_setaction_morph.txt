@@ -1,0 +1,6 @@
+# origin=source-derived api=v8 call=v8_setaction_morph
+# NOT a hardware capture -- pins the current packet builder's output only. See Doc/linux_roadmap/16-testing-and-validation.md, "source-derived" tier.
+> sleep 4
+> feat 01 0e 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+> sleep 6
+> write 01 0e 01 00 01 00 83 0a a5 05 0a ff 00 00 00 00 ff 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

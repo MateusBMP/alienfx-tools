@@ -57,5 +57,51 @@ target_link_libraries(alienfx_sdk_tests PRIVATE
     GTest::gtest_main)
 gtest_discover_tests(alienfx_sdk_tests)
 
-# M2+: extend alienfx_sdk_tests with alienfx_sdk/packet_builder_test.cpp,
-#      reading golden vectors from tests/golden/alienfx_sdk/ -- see tests/README.md.
+# --- alienfx test support (M2a) -------------------------------------------------
+# fake_hid.cpp implements hid_backend.h's transport seam by recording every call
+# instead of touching a device (Doc/linux_roadmap/16-testing-and-validation.md,
+# "The recording fake transport"); golden_vector.{h,cpp} reads/writes the extended
+# hex format it's stored in; packet_matrix.{h,cpp} is the shared version x
+# operation table both gen_golden and alienfx_sdk_packet_tests replay, so the two
+# are provably driving identical calls. ALIENFX_TESTING is PUBLIC so it reaches
+# AlienFX-SDK/AlienFX_SDK/AlienFX_SDK.h's TestSetDeviceState seam in every
+# consumer -- never defined outside this test tree, so it never reaches a shipped
+# binary on either platform.
+add_library(alienfx_test_support STATIC
+    support/fake_hid.cpp
+    support/golden_vector.cpp
+    support/packet_matrix.cpp)
+target_include_directories(alienfx_test_support PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/support>)
+target_compile_definitions(alienfx_test_support PUBLIC ALIENFX_TESTING)
+target_link_libraries(alienfx_test_support
+    PUBLIC  alienfx::sdk
+    PRIVATE alienfx::warnings)
+
+# --- alienfx_sdk_packet_tests (M2a) ---------------------------------------------
+# A separate executable from alienfx_sdk_tests above (which stays header-only, M1
+# scope): this one links the compiled alienfx::sdk library and the fake transport,
+# a materially different dependency profile. Golden vectors are read via an
+# absolute source-tree path -- ctest's working directory isn't guaranteed to be
+# the source tree, so a relative path would be fragile across CMake/CTest
+# versions and generators.
+add_executable(alienfx_sdk_packet_tests
+    alienfx_sdk/packet_builder_test.cpp
+    alienfx_sdk/protocol_invariants_test.cpp)
+target_compile_definitions(alienfx_sdk_packet_tests PRIVATE
+    ALIENFX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden/alienfx_sdk")
+target_link_libraries(alienfx_sdk_packet_tests PRIVATE
+    alienfx_test_support
+    alienfx::warnings
+    GTest::gmock
+    GTest::gtest_main)
+gtest_discover_tests(alienfx_sdk_packet_tests)
+
+# --- gen_golden (M2a) ------------------------------------------------------------
+# The golden-vector generator. Run by hand (see tests/README.md) -- deliberately
+# NOT registered with gtest_discover_tests/ctest, since golden vectors are
+# committed artifacts, not something a test run should regenerate.
+add_executable(gen_golden support/gen_golden.cpp)
+target_link_libraries(gen_golden PRIVATE
+    alienfx_test_support
+    alienfx::warnings)

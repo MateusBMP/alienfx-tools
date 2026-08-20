@@ -78,8 +78,7 @@ include(AlienfxDependency)   # -> alienfx_require_package()
 add_subdirectory(alienfx-gui/kiss_fft)
 
 add_subdirectory(Common)                          # alienfx::compat, alienfx::common
-add_subdirectory(AlienFX-SDK/AlienFX_SDK)         # alienfx::sdk_headers (M1: headers
-                                                   # only; M2 adds the STATIC library)
+add_subdirectory(AlienFX-SDK/AlienFX_SDK)         # alienfx::sdk_headers (M1), alienfx::sdk (M2a)
 # M4 : add_subdirectory(RegHelperLib)             # reg_helper
 # M5 : add_subdirectory(...)                      # alienfan_sdk (new Linux implementation)
 # M6 : add_subdirectory(...)                      # alienfxd (new daemon)

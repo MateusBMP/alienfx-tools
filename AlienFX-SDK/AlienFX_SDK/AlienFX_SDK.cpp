@@ -1,6 +1,7 @@
 //#define WIN32_LEAN_AND_MEAN
 #include "AlienFX_SDK.h"
 #include "alienfx-controls.h"
+#ifdef _WIN32
 extern "C" {
 #include <initguid.h>
 #include <hidclass.h>
@@ -10,6 +11,18 @@ extern "C" {
 
 #pragma comment(lib,"setupapi.lib")
 #pragma comment(lib, "hid.lib")
+#else
+// Linux stand-in for the handful of Win32 HID/kernel32 functions Functions:: calls
+// directly (PrepareAndSend, GetDeviceStatus, WaitForReady/WaitForBusy, ~Functions).
+// See Doc/linux_roadmap/04-alienfx-sdk-hid.md, "This same seam is what splits M2a
+// from M2b": M2a links against tests/support/fake_hid.cpp (records calls, no
+// device); M2b adds the real hidapi-hidraw implementation. Device enumeration
+// (AlienFXProbeDevice/AlienFXInitialize, below) and SetupAPI are unrelated to this
+// seam and stay deferred to M2c.
+#include "hid_backend.h"
+#include <cstring> // memset/memcpy (PrepareAndSend) -- pulled in transitively by
+                    // <hidsdi.h>/<SetupAPI.h> on the Windows arm above
+#endif
 
 // debug print
 #ifdef _DEBUG
@@ -20,6 +33,57 @@ extern "C" {
 #endif
 
 namespace AlienFX_SDK {
+
+#ifndef _WIN32
+	// This file is MSVC-authored, shared verbatim between platforms per M2a's
+	// purely-additive convention (Doc/linux_roadmap/18-windows-verification.md) --
+	// it is deliberately NOT rewritten to silence these. MSVC tolerates all of the
+	// patterns below; GCC/Clang warn under -Wall -Wextra -Wpedantic, which the
+	// gcc/clang CMakePresets.json presets turn into -Werror. This mirrors the
+	// identical situation, and the identical fix, already established for the
+	// anonymous-struct-in-union types in AlienFX_SDK.h (see that file's own
+	// #pragma GCC diagnostic block for the precedent this follows). Scoped to
+	// _WIN32 for the same reason that one is: MSVC does not understand `#pragma
+	// GCC diagnostic` and would otherwise warn about an unrecognized pragma.
+	//   - -Wmissing-field-initializers: brace-elided Afx_action initializers
+	//     throughout this file (e.g. `Afx_action({0})`, `{AlienFX_A_Morph}`) --
+	//     this SDK's established shorthand for "the rest zero-initialized", not a
+	//     bug; flagged as an M2 hand-off note in
+	//     tests/alienfx_sdk/sdk_headers_test.cpp (that note's specific line
+	//     numbers turned out to be inside Mappings, out of M2's scope per this
+	//     file's Functions/Mappings split -- these are different call sites, in
+	//     Functions, that the same note's underlying concern also covers).
+	//   - -Wsign-compare: `for (int ca = 0; ca < act->act.size(); ca++)` in
+	//     SetAction's V7 branch -- act->act.size() is always small (a handful of
+	//     light-action phases), never near SIZE_MAX, so the signedness mismatch
+	//     has no real consequence here.
+	//   - -Wimplicit-fallthrough: SetMaskAndColor's V6 case, `case
+	//     AlienFX_A_Breathing: c2 = {0}; case AlienFX_A_Morph:` -- deliberate,
+	//     documented fallthrough (breathing is morph with a zeroed second color).
+	//   - -Wextra (enumerated/non-enumerated conditional): SetV4Action's `ca->type
+	//     < AlienFX_A_Breathing ? ca->type : AlienFX_A_Morph` -- both operands are
+	//     already Action-enum values read back out of an Afx_action; the ternary
+	//     just clamps into range, not a real type confusion. No more specific
+	//     GCC/Clang flag name exists for this diagnostic than the -Wextra umbrella
+	//     itself.
+	//   - -Wnonnull-compare: `if (this && devHandle)` in PrepareAndSend -- checking
+	//     `this` is redundant on a well-formed call, but PrepareAndSend is also
+	//     invoked through `Afx_icommand`-returning helper chains where a null
+	//     `Functions*` was historically possible; preserving the check as written
+	//     rather than second-guessing the original author's intent here.
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+	#pragma GCC diagnostic ignored "-Wsign-compare"
+	#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+	#pragma GCC diagnostic ignored "-Wextra"
+	#ifdef __clang__
+	// Clang has no -Wnonnull-compare; it reports the same `if (this && ...)`
+	// pattern as -Wundefined-bool-conversion instead.
+	#pragma GCC diagnostic ignored "-Wundefined-bool-conversion"
+	#else
+	#pragma GCC diagnostic ignored "-Wnonnull-compare"
+	#endif
+#endif
 
 	vector<Afx_icommand> *Functions::SetMaskAndColor(vector<Afx_icommand>* mods, Afx_lightblock* act, bool needInverse, DWORD index) {
 		Afx_colorcode c = index ? index : needInverse ? ~((1 << act->index)) : 1 << act->index;
@@ -175,6 +239,7 @@ namespace AlienFX_SDK {
 		//return true;
 	}
 
+#ifdef _WIN32
 	bool Functions::AlienFXProbeDevice(void* hDevInfo, void* devData, WORD vidd, WORD pidd) {
 		DWORD dwRequiredSize = 0;
 		COMMTIMEOUTS timeouts = {100,0,0,10,200};
@@ -272,6 +337,26 @@ namespace AlienFX_SDK {
 		}
 		return version != API_UNKNOWN;
 	}
+#else
+	// TODO(M2c): udev/hidraw enumeration + detection, including the fix for the
+	// 33-vs-34 report-length off-by-one (Doc/linux_roadmap/local/test-machine.md,
+	// "Finding 1" -- Linux HID report descriptors don't include the leading
+	// report-ID byte Windows' OutputReportByteLength counts).
+	bool Functions::AlienFXProbeDevice(void* hDevInfo, void* devData, WORD vidd, WORD pidd) {
+		(void)hDevInfo; (void)devData; (void)vidd; (void)pidd;
+		version = API_UNKNOWN;
+		return false;
+	}
+
+	//Use this method for general devices, vid = 0 for any vid, pid = 0 for any pid.
+	// TODO(M2c): udev/hidraw enumeration.
+	bool Functions::AlienFXInitialize(WORD vidd, WORD pidd) {
+		(void)vidd; (void)pidd;
+		devHandle = NULL;
+		version = API_UNKNOWN;
+		return false;
+	}
+#endif
 
 #ifndef NOACPILIGHTS
 	bool Functions::AlienFXInitialize(AlienFan_SDK::Control* acc) {
@@ -890,6 +975,20 @@ namespace AlienFX_SDK {
 #endif
 	}
 
+#ifndef _WIN32
+	#pragma GCC diagnostic pop
+#endif
+
+// `Mappings` is registry-backed light-name/grid persistence (HKEY_CURRENT_USER,
+// 37 Reg*/HKEY references below) -- out of M2's scope entirely, not deferred within
+// it. See Doc/linux_roadmap/04-alienfx-sdk-hid.md, "Functions vs. Mappings: what M2
+// actually ports", and 06-configuration-storage.md for the Linux JSON backend that
+// replaces this class's role (M4). `Functions` (above) has no reference into this
+// class, so wrapping the whole thing is a clean cut, not a partial one. Left
+// entirely undefined on Linux (no stub) rather than stubbed: nothing calls it in
+// M2's scope, and Doc/linux_roadmap/17-milestones.md's M4 section is where a real
+// implementation belongs.
+#ifdef _WIN32
 	Mappings::~Mappings() {
 		for (auto i = fxdevs.begin(); i < fxdevs.end(); i++)
 			if (i->dev) delete i->dev;
@@ -1170,6 +1269,7 @@ namespace AlienFX_SDK {
 		Afx_device* dev = GetDeviceById(pid);
 		return dev ? GetFlags(dev, lightid) : 0;
 	}
+#endif // _WIN32 -- end of Mappings, see the block comment above its destructor
 
 	bool Functions::IsHaveGlobal()
 	{
