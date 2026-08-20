@@ -9,15 +9,22 @@ downstream dependents at all and can slip freely.
 
 ## M0 — Build scaffolding
 
-**Goal**: a CMake build exists alongside the `.sln`, builds an empty/stub target on
-Linux, and the Windows build is verified still green.
+**Goal**: a CMake build exists alongside the `.sln`, builds a real target on Linux, and
+the Windows build is unaffected by construction.
 **Doc**: [02](02-build-system.md).
-**Exit criteria**: `cmake --build` succeeds on Linux for at least one trivial target;
-`.sln` build unaffected.
+**Exit criteria**: `cmake --build` succeeds on Linux for at least one real (not stub)
+target; no MSBuild build input (`.sln`/`.vcxproj`/`.vcxitems`/`.props`/`.targets`) is
+modified — sound because no project file in the tree uses a wildcard item glob
+(verified), so a new-files-only change provably cannot alter what MSBuild compiles. An
+actual MSVC `.sln` build is deferred to a Windows-capable contributor and tracked in
+[18-windows-verification.md](18-windows-verification.md), not required for M0 itself.
+*(Originally worded as "`.sln` build unaffected" — amended because that phrasing is
+unverifiable by a developer without Windows access, which makes it a criterion that
+gets quietly waved through rather than actually checked.)*
 **Size**: small (new files only, no logic).
 **Risk**: low — mechanical, but sets conventions (option flags, dependency-acquisition
-pattern) every later milestone follows, so get the shape right here rather than
-patching it repeatedly later.
+pattern, no CI, GoogleTest, `tests/` layout) every later milestone follows, so get the
+shape right here rather than patching it repeatedly later.
 
 ## M1 — Platform compat layer
 

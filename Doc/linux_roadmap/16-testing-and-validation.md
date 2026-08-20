@@ -9,6 +9,37 @@ written from scratch (the config backend, the fan backend) and because the exist
 protocol logic being reused ([04](04-alienfx-sdk-hid.md)) is exactly the kind of
 byte-layout code that benefits most from golden-value tests.
 
+## Framework, layout, and format — decided in M0
+
+This doc originally left the test framework, directory layout, and golden-vector format
+unspecified. M0 decided and implemented all three (`cmake/AlienfxDependency.cmake`,
+`tests/CMakeLists.txt`, `tests/README.md` — the latter is the authoritative source for
+the details below, kept in one place rather than duplicated here):
+
+- **Framework: GoogleTest** (with GMock), acquired via `alienfx_require_package()`
+  (see [02](02-build-system.md)). Chosen over Catch2/doctest because
+  `gtest_discover_tests()` lives in CMake's own builtin `GoogleTest.cmake` module, so
+  CTest discovery works identically whether GTest came from the system package or
+  FetchContent — Catch2's equivalent ships inside its own source tree and needs
+  mode-dependent `CMAKE_MODULE_PATH` handling, which is exactly what the dependency
+  helper exists to avoid. CMake also ships `FindGTest.cmake` in the box (exporting
+  `GTest::gtest`/`gtest_main`/`gmock`/`gmock_main`), so `find_package(GTest)` succeeds
+  even on distros whose GTest package omits its own CMake config.
+- **Layout: top-level `tests/`**, not nested inside a source directory — every source
+  directory in this tree is upstream-owned, so a fork-owned top-level directory
+  minimizes merge surface. Sub-structured by target (`tests/kiss_fft/`,
+  `tests/alienfx_sdk/`, `tests/golden/<target>/`, `tests/support/`) with one flat
+  `tests/CMakeLists.txt` declaring every test executable.
+- **Golden-vector format**: one file per case at `tests/golden/<target>/<case>.txt` —
+  space-separated lowercase hex bytes, `#`-comments, first comment line recording
+  provenance (Windows-build commit SHA, VID/PID, API version, logical call). Decided
+  now because M0 sets conventions; not implemented until M2 actually has vectors to
+  store, captured per the procedure below and tracked as an open item in
+  [18-windows-verification.md](18-windows-verification.md).
+- **Assertion style**: `EXPECT_NEAR` for float comparisons (e.g. FFT results);
+  `EXPECT_THAT(actual, ElementsAreArray(expected, n))` for integral byte buffers, which
+  reports index-level mismatches rather than dumping the whole buffer.
+
 ## Packet-builder unit tests using golden byte vectors
 
 `AlienFX_SDK`'s offset-patch model ([04](04-alienfx-sdk-hid.md)) makes this cheap:
@@ -77,13 +108,26 @@ For any device where the existing protocol tables in
    exactly as documented in [05](05-alienfan-sdk-thermal.md) and demonstrated live in
    upstream issue #434's exchange between `urbanze` and `T-Troll`.
 
-## CI
+## CI: deliberately none
 
-Once a CMake build exists ([02](02-build-system.md)), add CI building the Linux target
-with both GCC and Clang (catches the MSVC-extension issues cataloged in
-[03](03-platform-abstraction.md) early — anonymous struct-in-union, calling
-conventions, etc., since GCC and Clang differ in which MS extensions they tolerate and
-how). Keep a CI job (or at minimum a documented manual check) confirming the existing
-MSVC `.sln` build still succeeds — this roadmap's explicit constraint is that Linux
-work must not break Windows ([README.md](README.md)'s decisions,
-[02](02-build-system.md)'s "what NOT to do").
+**This project runs no CI** — no `.github/workflows/`, decided explicitly during M0.
+Every check below is a local, developer-run command instead. This is a real tradeoff,
+recorded honestly rather than glossed over: these checks now depend on someone actually
+running them before a commit, with nothing automated catching a skipped check.
+
+What would have been CI jobs are `CMakePresets.json` presets instead, each one command:
+
+| Preset | Replaces the CI job that would have... |
+|---|---|
+| `gcc`, `clang` | ...built the Linux target with both compilers, catching the MSVC-extension issues cataloged in [03](03-platform-abstraction.md) — anonymous struct-in-union, calling conventions — since GCC and Clang differ in which MS extensions they tolerate and how. In M0 this only compiles portable vendored C (`kiss_fft`); it starts paying off in M1, once Windows-flavored code first compiles under both. |
+| `gcc-fetched` | ...kept the FetchContent dependency-acquisition branch exercised, instead of it silently rotting between milestones. |
+| `system-only` | ...caught a dependency that only works via network fetch, before a packager hit the same failure. |
+
+Confirming the existing MSVC `.sln` build still succeeds — this roadmap's explicit
+constraint that Linux work must not break Windows
+([README.md](README.md)'s decisions, [02](02-build-system.md)'s "what NOT to do") — is
+**not** a CI job either. See [18-windows-verification.md](18-windows-verification.md)
+for the full argument: M0's new-files-only shape makes this provable by construction
+without an actual Windows build (no `.vcxproj`/`.vcxitems` in the tree uses a wildcard
+item glob, verified), and that same doc is where an actual MSVC build gets tracked as
+an open item for whenever a Windows-capable contributor is available.

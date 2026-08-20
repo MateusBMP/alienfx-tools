@@ -35,6 +35,15 @@ using LPVOID = void*;
 // 03 is a real GUI dependency and belongs in 10, not compat-shimmed away.
 ```
 
+**Do not add a `byte` typedef to this list — verified during M0.** The project builds
+with `using namespace std;` everywhere (`AlienFX_SDK.h:10` and others), and under C++17
+(the standard this port targets, see [02](02-build-system.md)) the unqualified name
+`byte` resolves to `std::byte`, a scoped enum that rejects the brace-initializer lists
+`alienfx-controls.h`'s data tables use (`const byte COMMV1_color[]{ 1, 0x03 };` fails to
+compile: `'byte' does not name a type` becomes a `std::byte` init-list error once a
+typedef is added). The actual fix when M1 ports `alienfx-controls.h` is to retype its
+tables to `BYTE`/`uint8_t`, not to shim `byte` itself.
+
 Keep this header minimal and additive — its job is to satisfy the type system for
 *data-layer* code, not to pretend Win32 APIs exist. If a file needs an actual Win32
 *call* (not just a type), that call belongs in a `#ifdef _WIN32` / `#else` split at the

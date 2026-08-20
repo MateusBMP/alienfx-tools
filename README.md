@@ -89,6 +89,8 @@ Build process:
 - Clone repository
 - Open solution from your Visual Studio, build.
 
+(This fork also has an experimental Linux build in progress — see [`Doc/linux-build.md`](Doc/linux-build.md).)
+
 ## ToDo list
 
 - [ ] Ryzen ACPI sensors/control (AMD)

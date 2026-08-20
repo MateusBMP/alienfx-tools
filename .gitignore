@@ -1,4 +1,16 @@
 
+### Linux port (CMake) — fork-added; see Doc/linux_roadmap/02-build-system.md ###
+# Placed at the top deliberately: upstream only ever appends at EOF (verified across
+# all 21 commits touching this file), so a block here never conflicts on merge.
+/build/
+/out/
+CMakeUserPresets.json
+compile_commands.json
+# Droppings from a rejected in-source `cmake -S . -B .` attempt (the root
+# CMakeLists.txt's guard errors out, but CMake writes these before it gets there).
+/CMakeCache.txt
+/CMakeFiles/
+
 # Created by https://www.gitignore.io/api/windows,visualstudio,visualstudiocode
 
 ### VisualStudioCode ###

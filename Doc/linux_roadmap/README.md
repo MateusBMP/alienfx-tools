@@ -76,7 +76,8 @@ implementation progress, and edits only the specific docs affected.
                                    ▼
                           14 (LightFX library, lowest priority)
 
-Cross-cutting, apply throughout: 15 (packaging/permissions), 16 (testing)
+Cross-cutting, apply throughout: 15 (packaging/permissions), 16 (testing),
+                                  18 (Windows verification ledger)
 Full milestone breakdown with entry/exit criteria: 17 (milestones)
 ```
 
@@ -105,6 +106,7 @@ sizes and risk notes — the diagram above is the dependency shape, not the sche
 | [15-packaging-and-permissions.md](15-packaging-and-permissions.md) | udev, kernel requirements, distro packaging |
 | [16-testing-and-validation.md](16-testing-and-validation.md) | Test strategy given zero existing tests |
 | [17-milestones.md](17-milestones.md) | The long roadmap: M0–M10 with entry/exit criteria |
+| [18-windows-verification.md](18-windows-verification.md) | Permanent ledger of tasks that need a Windows machine, since none is available to the current developer |
 
 ## What we are explicitly not porting (yet)
 

@@ -63,14 +63,28 @@ alienfx-gui            (exe, Qt6, depends on alienfx_sdk + alienfan_sdk + common
 ```
 
 Notes:
-- `kiss_fft` ports unchanged (pure C DSP, no Windows deps) — becomes a plain
-  `add_library(kiss_fft STATIC ...)` reused by the GUI's haptics code ([12](12-audio-haptics.md)).
+- `kiss_fft` ports unchanged (pure C DSP, no Windows deps) — implemented in M0 as
+  `alienfx-gui/kiss_fft/CMakeLists.txt`, `add_library(kiss_fft STATIC ...)`, reused by
+  the GUI's haptics code ([12](12-audio-haptics.md)). Deliberately not gated behind
+  `ALIENFX_BUILD_GUI` (see the M0 decisions above) — it's a leaf dependency, not GUI
+  code, despite its directory.
 - The four `.vcxitems` shared-source projects fold into whichever CMake target
   consumes them today, exactly as they do in MSBuild — do not invent new library
   boundaries for them unless a specific doc (06, 09) asks for it.
 - `alienfx-LFX`'s `LoadLibrary`/`GetProcAddress` client code becomes `dlopen`/`dlsym`
   inside whichever target uses "high-level" mode (`alienfx-cli`); see
   [14](14-lightfx-library.md).
+
+**Per-target CMake file placement — decided in M0**: `CMakeLists.txt` goes inside each
+existing source directory (`AlienFX-SDK/AlienFX_SDK/CMakeLists.txt`,
+`Common/CMakeLists.txt`, etc.), added via `add_subdirectory(...)` from the root, exactly
+as `alienfx-gui/kiss_fft/CMakeLists.txt` already does. The alternative considered — all
+per-target logic centralized in `cmake/targets/*.cmake` at repo root, landing zero new
+files in upstream-owned directories — was rejected: per-directory `CMakeLists.txt` is
+the idiomatic CMake layout, and critically it's *upstreamable*, which matters given the
+maintainer's stated wish (see [01](01-why-no-linux-support.md)) that the SDKs stay
+reusable libraries. New files conflict with upstream only if upstream happens to add
+the exact same path, which is rare for a build file upstream doesn't have.
 
 ## Root `CMakeLists.txt` shape
 
@@ -81,15 +95,62 @@ Gate everything Windows-specific behind `if(WIN32)` so the existing `.sln` remai
 canonical Windows build; CMake should not become the only way to build for Windows
 unless a future decision explicitly retires MSBuild.
 
-Suggested option flags, modeled after `tr1xem/alienfx-linux`'s `ALIENFX_BUILD_CLI`
-pattern:
+Option flags, modeled after `tr1xem/alienfx-linux`'s `ALIENFX_BUILD_CLI` pattern and
+**implemented as of M0** in the root `CMakeLists.txt`:
 
 ```
 option(ALIENFX_BUILD_CLI    "Build alienfx-cli / alienfan-cli" ON)
 option(ALIENFX_BUILD_DAEMON "Build the background daemon"       ON)
 option(ALIENFX_BUILD_GUI    "Build the Qt6 GUI"                 OFF)  # heavier deps
-option(ALIENFX_BUILD_TESTS  "Build unit tests (see 16)"         OFF)
+option(ALIENFX_BUILD_TESTS  "Build unit tests (see 16)"         OFF)  # ON via presets
+option(ALIENFX_WERROR       "Treat compiler warnings as errors" OFF)  # fork-added
 ```
+
+`ALIENFX_WERROR` is not part of the original four — it's a fork addition wired to the
+`alienfx::warnings` INTERFACE target (`cmake/AlienfxWarnings.cmake`) so vendored code
+and FetchContent'd dependencies can opt out simply by not linking it.
+
+### M0 decisions that bind everything after it
+
+- **CMake floor**: `cmake_minimum_required(VERSION 3.24...4.0)`. 3.24 is not arbitrary —
+  it's the version that introduced `FetchContent_Declare(... FIND_PACKAGE_ARGS ...)`,
+  which *is* the find-package-first/FetchContent-fallback policy below, implemented by
+  CMake itself rather than a hand-rolled `if(NOT FOUND)` branch. The `...4.0` policy
+  range silences CMake 4.x's old-policy nagging while still running on 3.24.
+- **C++ standard**: C++17 (`CXX_STANDARD_REQUIRED ON`, `CXX_EXTENSIONS OFF`), C11 for
+  vendored C. C++17 is the minimum the roadmap actually needs — [03](03-platform-abstraction.md)
+  maps `CustomMutex`'s SRWLOCK onto `std::shared_mutex`, [06](06-configuration-storage.md)'s
+  config backend wants `<filesystem>` — not an arbitrary pick, and not C++20 (nothing in
+  the roadmap needs it). `CXX_EXTENSIONS OFF` means `-std=c++17`, not `-std=gnu++17` —
+  this makes GCC and Clang *disagree* about MS-extension tolerance in more places, which
+  is exactly the divergence [16](16-testing-and-validation.md) wants a GCC/Clang check
+  to catch.
+- **Two mechanical guards** in the root `CMakeLists.txt`: a `FATAL_ERROR` unless
+  `-DALIENFX_ALLOW_WINDOWS_CMAKE=ON` when `WIN32` is set (enforces "don't drive the
+  Windows build from CMake" below), and a `FATAL_ERROR` on in-source builds (keeps
+  generated files out of upstream-owned directories). Both were verified to actually
+  fire during implementation, and the in-source guard's droppings
+  (`CMakeCache.txt`/`CMakeFiles/` at repo root, written by CMake before the guard is
+  reached) needed their own `.gitignore` entries — a rejected in-source attempt still
+  leaves untracked files.
+- **Never glob sources.** `alienfx-gui/kiss_fft/tools/kiss_fftr.c` and
+  `tools/kiss_fftr.cpp` are byte-identical (verified with `diff`); a `file(GLOB)` over
+  `tools/` would compile both and produce duplicate symbols. Every target in this
+  project lists its sources explicitly for this reason.
+- **`kiss_fft` is the M0 proof target**, and it is deliberately **not** gated behind
+  `ALIENFX_BUILD_GUI` even though it lives under `alienfx-gui/` — it's a leaf DSP
+  dependency (no Windows deps, no GUI deps) consumed by the haptics code in
+  [12](12-audio-haptics.md) and by the test suite. Gating it would make a default
+  `cmake --build` compile nothing, defeating the point of having a first real target.
+  Its `CMakeLists.txt` excludes `tools/kiss_fastfir.c` and `tools/kfc.c` (both define
+  `main()` under build-time macros; `kiss_fastfir.c` also isn't warning-clean) and
+  `tools/kiss_fftnd.c` (unused) — only `kiss_fft.cpp` + `tools/kiss_fftr.cpp` are built,
+  matching what `alienfx-gui/WSAudioIn.cpp` actually calls.
+- **`.editorconfig`/`.clang-format` are out of scope**, now and for any future
+  milestone, unless explicitly revisited — a repo-wide reformat would create enormous
+  merge noise against every file upstream actively edits.
+- **No CI.** No `.github/workflows/` exists or is planned. See
+  [16](16-testing-and-validation.md) for what replaces it.
 
 ## Dependency acquisition
 
@@ -103,20 +164,43 @@ library ([06](06-configuration-storage.md)).
 `loguru`, and `nlohmann_json` entirely via `FetchContent` at configure time. That's fine
 for a hobby build but is a poor fit for actual distro packaging (AUR/deb/rpm expect
 `find_package`-able system libraries, and network access during a packaged build is
-often disallowed or sandboxed). Prefer:
+often disallowed or sandboxed).
+
+**Implemented as of M0** as `alienfx_require_package()` in `cmake/AlienfxDependency.cmake`,
+on top of `FetchContent_Declare(... FIND_PACKAGE_ARGS ...)` (CMake ≥ 3.24 — the reason
+for the version floor above) rather than a hand-rolled `if(NOT FOUND)` branch:
 
 ```cmake
-find_package(hidapi QUIET)
-if(NOT hidapi_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(hidapi ...)
-    FetchContent_MakeAvailable(hidapi)
-endif()
+alienfx_require_package(googletest
+    FIND_ARGS      NAMES GTest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.17.0
+    OPTIONS        INSTALL_GTEST=OFF BUILD_GMOCK=ON gtest_force_shared_crt=ON)
 ```
 
-for each dependency — `find_package` first, `FetchContent` fallback for
-developer/CI convenience. Revisit per-dependency in [15](15-packaging-and-permissions.md)
-once real package availability across target distros is known.
+**Rule**: every third-party dependency in this project goes through this function.
+`FETCHCONTENT_TRY_FIND_PACKAGE_MODE` defaults to `OPT_IN` — a bare `FetchContent_Declare`
+without `FIND_PACKAGE_ARGS` is silently network-only and breaks distro packaging with no
+error at all.
+
+Both acquisition paths are exercised locally via `CMakePresets.json` (there is no CI to
+do this automatically): the `gcc-fetched` preset sets
+`FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER` to force the source-build branch even on a
+machine that has every dependency installed; the `system-only` preset sets
+`FETCHCONTENT_FULLY_DISCONNECTED=ON` to simulate a distro packaging sandbox — a missing
+system dependency must be a loud configure failure, never a silent network fetch. Both
+were run against GoogleTest during M0 and produced the expected `STATUS` line
+(`... -> built from source` / `... -> system package`) in each case.
+
+`SYSTEM` (CMake ≥ 3.25) and `EXCLUDE_FROM_ALL` (≥ 3.28) on `FetchContent_Declare` are
+used opportunistically, guarded by a `CMAKE_VERSION` check, rather than raising the
+3.24 floor. Also recorded in the helper for when M2 pulls in `hidapi`/`libusb`: CMake
+4.x hard-errors on a dependency declaring `cmake_minimum_required(VERSION <3.5)` —
+prefer pinning a modern tag; if unavoidable, scope `CMAKE_POLICY_VERSION_MINIMUM`
+(CMake ≥ 4.0) to that one call, never project-wide.
+
+Revisit per-dependency in [15](15-packaging-and-permissions.md) once real package
+availability across target distros is known.
 
 ## What NOT to do
 

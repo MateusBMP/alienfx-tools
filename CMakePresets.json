@@ -1,0 +1,83 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "ALIENFX_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development (Debug)",
+      "description": "Default day-to-day preset: Debug build, tests on, default compiler.",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "gcc",
+      "displayName": "GCC (RelWithDebInfo)",
+      "description": "Half of the GCC/Clang MS-extension-divergence check from Doc/linux_roadmap/16-testing-and-validation.md — run locally, no CI.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "ALIENFX_WERROR": "ON"
+      }
+    },
+    {
+      "name": "clang",
+      "displayName": "Clang (RelWithDebInfo)",
+      "description": "Other half of the GCC/Clang divergence check. GCC and Clang tolerate different MSVC extensions, which is exactly what this pair is meant to surface.",
+      "inherits": "gcc",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "gcc-fetched",
+      "displayName": "GCC, dependencies forced to FetchContent",
+      "description": "Forces every alienfx_require_package() dependency down the FetchContent branch, so that path is exercised even though this machine has every dependency available as a system package.",
+      "inherits": "gcc",
+      "cacheVariables": {
+        "FETCHCONTENT_TRY_FIND_PACKAGE_MODE": "NEVER"
+      }
+    },
+    {
+      "name": "system-only",
+      "displayName": "GCC, no network (packager simulation)",
+      "description": "Simulates a distro packaging sandbox: no downloads allowed. A missing system dependency must be a loud configure failure, never a silent network fetch.",
+      "inherits": "gcc",
+      "cacheVariables": {
+        "FETCHCONTENT_FULLY_DISCONNECTED": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "gcc", "configurePreset": "gcc" },
+    { "name": "clang", "configurePreset": "clang" },
+    { "name": "gcc-fetched", "configurePreset": "gcc-fetched" },
+    { "name": "system-only", "configurePreset": "system-only" }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
+    { "name": "gcc", "inherits": "base", "configurePreset": "gcc" },
+    { "name": "clang", "inherits": "base", "configurePreset": "clang" },
+    { "name": "gcc-fetched", "inherits": "base", "configurePreset": "gcc-fetched" },
+    { "name": "system-only", "inherits": "base", "configurePreset": "system-only" }
+  ]
+}
