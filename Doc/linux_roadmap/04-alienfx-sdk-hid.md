@@ -33,7 +33,7 @@ each; this is the short version of *where in this doc* each one lives:
 | Sub-milestone | What | Where in this doc |
 |---|---|---|
 | **M2a** | Compile `Functions` behind a recording fake transport; freeze `source-derived` golden vectors for all 7 versions; `hand-derived` tests for the 4 fragile spots | "The transport core", all seven "Per-version command tables" subsections, "Timing is not optional" |
-| **M2b** | Real `hidapi-hidraw` transport backend + `--dry-run` | "hidraw / hidapi mapping" |
+| **M2b** | Real `hidapi` transport backend + `--dry-run` (done) | "hidraw / hidapi mapping", "M2b's decided mapping and the four defects it found" |
 | **M2c** | udev/hidraw enumeration; fixes the 33-vs-34 report-length bug | "API version enum and detection" |
 | **M2d** | Live API_V4 validation | N/A — hardware step, see `local/test-machine.md` |
 | **M2e** | V5 collection-aware detection design | "API version enum and detection", the V5/Darfon row |
@@ -238,14 +238,106 @@ chosen (`tr1xem/alienfx-linux`'s `libusb_helper.cpp` includes one that walks
 `libusb_get_config_descriptor` for the `LIBUSB_TRANSFER_TYPE_INTERRUPT` IN endpoint) —
 skip it entirely if hidraw suffices.
 
+### M2b's decided mapping and the four defects it found
+
+**Status: done.** `AlienFX-SDK/AlienFX_SDK/hid_backend_linux.cpp` implements exactly the
+table above, over `hidapi-hidraw` (headers only at link time — see `hid_backend_linux.cpp`'s
+own file comment for why). Confirmed against this fork's installed hidapi 0.15.0:
+
+| `hid_backend.h` symbol | hidapi call | Return mapping |
+|---|---|---|
+| `HidD_SetOutputReport` | `hid_send_output_report` (hidapi >= 0.15.0) / `hid_write` (older) | `>= 0` -> `TRUE` |
+| `HidD_SetFeature` | `hid_send_feature_report` | `>= 0` -> `TRUE` |
+| `HidD_GetFeature` | `hid_get_feature_report` | `>= 0` -> `TRUE` |
+| `HidD_GetInputReport` | `hid_get_input_report` | `>= 0` -> `TRUE` |
+| `WriteFile` | `hid_write` | `>= 0` -> `TRUE`, `*written = n` |
+| `ReadFile` | `hid_read_timeout(..., 100)` | `-1` -> `FALSE`; `0` (timeout) -> `TRUE`, `*read = 0` |
+| `CloseHandle` | `hid_close` | always `TRUE` |
+| `Sleep` | `std::this_thread::sleep_for` | — |
+
+Four porting defects surfaced by actually writing this file, none visible from reading
+`AlienFX_SDK.cpp` alone:
+
+1. **`Get*` calls need `buffer[0]` pre-set to the requested report ID.** hidapi's
+   `hid_get_feature_report`/`hid_get_input_report` docs are explicit: "Set the first byte
+   of `data[]` to the Report ID of the report to be read... Upon return, the first byte
+   will still contain the Report ID, and the report data will start in `data[1]`." The
+   underlying `HIDIOCGFEATURE`/`HIDIOCGINPUT` ioctls have the same contract. But
+   `GetDeviceStatus` (`AlienFX_SDK.cpp:872-905`) passes a fresh, uninitialized stack
+   buffer straight into `HidD_GetFeature`/`HidD_GetInputReport` — V5's report ID is
+   `0xcc` (`reportIDList[API_V5]`), so an uninitialized byte 0 there requests a
+   nonexistent report and the call legitimately fails. **Fixed**: three additive
+   `#ifndef _WIN32` lines set `buffer[0] = reportIDList[version]` immediately before each
+   `Get*` call — purely additive, `Mappings`/Windows untouched, same convention M1/M2a
+   established. What this fix deliberately does *not* touch: V2/V3's
+   `return buffer[0]` (`AlienFX_SDK.cpp:901`) reads the *response* byte, and hidapi's own
+   doc comment above implies `HidD_GetInputReport`'s response, like `GetFeature`'s, keeps
+   the echoed report ID at byte 0 with real data starting at byte 1 for a *numbered*
+   report (V2/V3's report ID is `2`, not `0`) — which would mean `buffer[0]` is the
+   report ID, not the status, making that pre-existing read questionable on real
+   hardware. Reinterpreting which offset holds the status is a protocol-correctness
+   question needing V2/V3 hardware to settle (none exists on this fork's test machine,
+   see `local/test-machine.md`), not something to silently reinterpret while fixing an
+   unrelated uninitialized-input bug — recorded here, not fixed, same treatment as the
+   `SavePowerBlock` defect below.
+2. **`ReadFile`'s timeout is not an error.** Windows' `ReadFile` (with the
+   `COMMTIMEOUTS` this SDK sets, `AlienFX_SDK.cpp:180,252`) returns `TRUE` with 0 bytes on
+   a timeout. `hid_read_timeout` returns `0` on timeout and `-1` on error — collapsing
+   both to "failure" would make every V7 operation report failure, since V7's
+   read-after-write (`AlienFX_SDK.cpp:192-194`) exists purely to complete the transaction
+   and its result is never inspected by the caller. **Fixed**: only `-1` maps to `FALSE`;
+   `0` maps to `TRUE` with `*read = 0`. Uses `hid_read_timeout(..., 100)` rather than a
+   blocking `hid_read`, mirroring the 100ms `ReadIntervalTimeout` already set, so an
+   unresponsive device can't hang the process.
+3. **`HidD_SetOutputReport` and `hid_write` are different transfers.** Windows'
+   `SET_OUTPUT_REPORT` is a control-endpoint `Set_Report` transfer; `hid_write` is an
+   interrupt transfer — genuinely different on the wire, and V2/V3/V4 all go through
+   this call. hidapi's matching call, `hid_send_output_report`, only exists from 0.15.0.
+   **Fixed**: `#if HID_API_VERSION >= HID_API_MAKE_VERSION(0, 15, 0)` picks
+   `hid_send_output_report` when available and falls back to `hid_write` at compile time
+   otherwise (Debian/Ubuntu LTS ships older hidapi); `ALIENFX_HID_OUTPUT_MODE=report|write`
+   picks between the two at runtime once both exist, so M2d can settle which one real
+   V2/V3/V4 hardware actually wants without a rebuild.
+4. **hidapi's own source needs `gnu11`, not `c11`.** `linux/hid.c` uses `wcsdup`/
+   `strdup`/`strtok_r`/`O_CLOEXEC` (POSIX/GNU libc extensions) with no feature-test macro
+   of its own, relying on being compiled as `gnu11`. This project's project-wide
+   `CMAKE_C_EXTENSIONS OFF` (deliberate, see [02](02-build-system.md)) is inherited by
+   `FetchContent`'s subdirectory build unless overridden, which silently turned that into
+   `c11` and hid every one of those declarations — caught by actually exercising the
+   `gcc-fetched` preset, not by reading hidapi's source. **Fixed**: `CMAKE_C_EXTENSIONS`
+   is toggled `ON` then back `OFF` bracketing just the `hidapi` `alienfx_require_package()`
+   call in the top-level `CMakeLists.txt`; only affects the FetchContent (source-build)
+   branch — the system-package branch links a prebuilt `.so` and never compiles `hid.c`.
+
+**Where the dependency is declared**: the top-level `CMakeLists.txt`, not
+`AlienFX-SDK/AlienFX_SDK/CMakeLists.txt`. `find_package()`'s `IMPORTED` targets
+(`hidapi::include`, `hidapi::hidraw`) are only visible in the directory that called
+`find_package()` and that directory's own subdirectories — `AlienFX-SDK/AlienFX_SDK`
+(which needs `hidapi::include` for `alienfx::hid_linux`) and `tests/` (which needs both
+for `fake_hidapi`/`dry_run_demo`) are siblings, so the shallowest common ancestor is the
+project root.
+
+**Vendor allowlist and dry run**, the safety posture [17](17-milestones.md)'s M2b section
+mentions: `hid_backend_linux.h` exposes `alienfx_hid::SetAllowAnyVendor`/`SetDryRun`/
+`SetDryRunSink`/`SetOutputMode`, each seedable once from an environment variable
+(`ALIENFX_ALLOW_ANY_VENDOR`/`ALIENFX_DRY_RUN`/`ALIENFX_HID_OUTPUT_MODE`) and overridable
+at runtime. `RegisterDevice(HANDLE, vid, pid)` is the registry the allowlist gate checks
+first, falling back to `hid_get_device_info()` (no I/O, cached on the handle at open
+time) when a handle wasn't registered — M2c's device-open path is the real, eventual
+caller of `RegisterDevice`; today only tests and `tests/support/dry_run_demo.cpp` call it
+directly, since M2b never opens a device itself.
+
 **This same seam is what splits M2a from M2b.** `AlienFX-SDK/AlienFX_SDK/hid_backend.h`
-declares exactly these six symbols (plus `Sleep`) with signatures matching the existing
-call sites, so `PrepareAndSend`/`GetDeviceStatus` need no changes either way. M2a links
-`Functions` against `tests/support/fake_hid.cpp` — a backend that logs calls instead of
-touching a device, used to freeze golden vectors with no hidapi dependency and no
-hardware. M2b later adds `hid_backend_linux.cpp`, the real `hidapi-hidraw` implementation
-shown above; M2a's tests are the regression check that M2b's real backend still produces
-the exact same bytes.
+declares exactly these six symbols (plus `Sleep`/`CloseHandle`) with signatures matching
+the existing call sites, so `PrepareAndSend`/`GetDeviceStatus` need no changes either way.
+M2a links `Functions` against `tests/support/fake_hid.cpp` — a backend that logs calls
+instead of touching a device, used to freeze golden vectors with no hidapi dependency and
+no hardware. M2b adds `hid_backend_linux.cpp`, the real `hidapi` implementation detailed
+in the next section; its own tests link that same real file against
+`tests/support/fake_hidapi.cpp` (a stub of *hidapi's* API, one layer further down) rather
+than a real device, so the regression check that M2b's real backend still produces the
+exact same bytes needs no hardware either — see [17](17-milestones.md)'s M2b section for
+why that split exists.
 
 ### Timing is not optional
 

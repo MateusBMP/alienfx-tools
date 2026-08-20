@@ -199,6 +199,35 @@ used opportunistically, guarded by a `CMAKE_VERSION` check, rather than raising 
 prefer pinning a modern tag; if unavoidable, scope `CMAKE_POLICY_VERSION_MINIMUM`
 (CMake ≥ 4.0) to that one call, never project-wide.
 
+**`hidapi` landed in M2b** (`alienfx_require_package(hidapi ...)`, `hidapi-0.15.0`),
+confirming two things about that gotcha and surfacing a second, unrelated one:
+
+- The `cmake_minimum_required` floor gotcha above did **not** fire against this hidapi
+  version/CMake combination — recorded as "checked", not left as an open risk.
+- A gotcha nothing above predicted: hidapi's own `linux/hid.c` uses POSIX/GNU libc
+  extensions (`wcsdup`/`strdup`/`strtok_r`/`O_CLOEXEC`) with no feature-test macro of its
+  own, so it needs to be compiled as `gnu11`. This project's project-wide
+  `CMAKE_C_EXTENSIONS OFF` (the C-standard analogue of the deliberate `CXX_EXTENSIONS
+  OFF` above) is inherited by `FetchContent`'s subdirectory build unless overridden,
+  which silently turns that into `c11` and hides every one of those declarations —
+  caught only by actually exercising the `gcc-fetched` preset (the system-package branch
+  links a prebuilt `.so` and never compiles `hid.c`, so it never surfaced there). Fixed
+  the same way as the version-floor gotcha: `CMAKE_C_EXTENSIONS` toggled `ON` then back
+  `OFF`, scoped tightly around just the `hidapi` `alienfx_require_package()` call.
+
+Also worth recording since it wasn't obvious going in: `alienfx_require_package(hidapi
+...)` is declared in the **top-level** `CMakeLists.txt`, not inside
+`AlienFX-SDK/AlienFX_SDK/CMakeLists.txt` even though that's the only directory whose
+target (`alienfx::hid_linux`) links it directly. `find_package()`'s `IMPORTED` targets
+(`hidapi::include`, `hidapi::hidraw`) are only visible in the directory that called
+`find_package()` and that directory's own subdirectories — `AlienFX-SDK/AlienFX_SDK` and
+`tests/` (which also needs `hidapi::include` for `fake_hidapi`, and `hidapi::hidraw` for
+`dry_run_demo`) are siblings, not one a child of the other, so the shallowest common
+ancestor able to see the dependency in both places is the project root. This does not
+apply to regular (non-`IMPORTED`) targets like `alienfx::compat`/`alienfx::warnings` —
+those are visible build-tree-wide once created regardless of which directory created
+them; the restriction is specific to `find_package()`'s `IMPORTED` targets.
+
 Revisit per-dependency in [15](15-packaging-and-permissions.md) once real package
 availability across target distros is known.
 

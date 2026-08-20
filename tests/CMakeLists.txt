@@ -57,18 +57,19 @@ target_link_libraries(alienfx_sdk_tests PRIVATE
     GTest::gtest_main)
 gtest_discover_tests(alienfx_sdk_tests)
 
-# --- alienfx test support (M2a) -------------------------------------------------
-# fake_hid.cpp implements hid_backend.h's transport seam by recording every call
-# instead of touching a device (Doc/linux_roadmap/16-testing-and-validation.md,
-# "The recording fake transport"); golden_vector.{h,cpp} reads/writes the extended
-# hex format it's stored in; packet_matrix.{h,cpp} is the shared version x
-# operation table both gen_golden and alienfx_sdk_packet_tests replay, so the two
-# are provably driving identical calls. ALIENFX_TESTING is PUBLIC so it reaches
-# AlienFX-SDK/AlienFX_SDK/AlienFX_SDK.h's TestSetDeviceState seam in every
-# consumer -- never defined outside this test tree, so it never reaches a shipped
-# binary on either platform.
+# --- alienfx test support (M2a/M2b) ----------------------------------------------
+# The parts every fake transport and both packet-test executables share:
+# golden_vector.{h,cpp} reads/writes the extended hex format golden vectors are
+# stored in; transport_log.{h,cpp} is the TransportKind/TransportEvent vocabulary
+# both fake_hid.cpp (below) and fake_hidapi.cpp record into, so a golden file
+# means the same thing under either fake; packet_matrix.{h,cpp} is the shared
+# version x operation table gen_golden, alienfx_sdk_packet_tests, and
+# alienfx_sdk_transport_tests all replay, so all three are provably driving
+# identical calls. ALIENFX_TESTING is PUBLIC so it reaches AlienFX-SDK/AlienFX_SDK/
+# AlienFX_SDK.h's TestSetDeviceState seam in every consumer -- never defined
+# outside this test tree, so it never reaches a shipped binary on either platform.
 add_library(alienfx_test_support STATIC
-    support/fake_hid.cpp
+    support/transport_log.cpp
     support/golden_vector.cpp
     support/packet_matrix.cpp)
 target_include_directories(alienfx_test_support PUBLIC
@@ -77,6 +78,33 @@ target_compile_definitions(alienfx_test_support PUBLIC ALIENFX_TESTING)
 target_link_libraries(alienfx_test_support
     PUBLIC  alienfx::sdk
     PRIVATE alienfx::warnings)
+
+# --- alienfx_test_fake_hid (M2a) -------------------------------------------------
+# fake_hid.cpp implements hid_backend.h's Windows-shaped transport seam directly
+# (HidD_SetOutputReport/WriteFile/ReadFile/...) by recording every call instead of
+# touching a device (Doc/linux_roadmap/16-testing-and-validation.md, "The
+# recording fake transport"). Split from alienfx_test_support (M2b) once a second
+# fake (fake_hidapi, below) needed the shared matrix/golden-vector plumbing
+# without also linking this one -- the two fakes back different transport seams
+# and are never linked into the same binary.
+add_library(alienfx_test_fake_hid STATIC support/fake_hid.cpp)
+target_link_libraries(alienfx_test_fake_hid
+    PUBLIC  alienfx_test_support
+    PRIVATE alienfx::warnings)
+
+# --- alienfx_test_fake_hidapi (M2b) ----------------------------------------------
+# fake_hidapi.cpp implements the *hidapi* C API instead -- the seam
+# hid_backend_linux.cpp (alienfx::hid_linux) actually calls. Links hidapi::include
+# for the header-only hid_device/hid_device_info declarations it stubs, never
+# hidapi::hidraw -- see AlienFX-SDK/AlienFX_SDK/CMakeLists.txt's comment on
+# alienfx_hid_linux for why exactly one hidapi implementation may ever be linked
+# into a given binary.
+add_library(alienfx_test_fake_hidapi STATIC support/fake_hidapi.cpp)
+target_link_libraries(alienfx_test_fake_hidapi
+    PUBLIC  alienfx_test_support
+            hidapi::include   # transport_backend_test.cpp also #includes <hidapi.h> directly
+    PRIVATE alienfx::warnings
+            alienfx::hid_linux)
 
 # --- alienfx_sdk_packet_tests (M2a) ---------------------------------------------
 # A separate executable from alienfx_sdk_tests above (which stays header-only, M1
@@ -91,11 +119,32 @@ add_executable(alienfx_sdk_packet_tests
 target_compile_definitions(alienfx_sdk_packet_tests PRIVATE
     ALIENFX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden/alienfx_sdk")
 target_link_libraries(alienfx_sdk_packet_tests PRIVATE
-    alienfx_test_support
+    alienfx_test_fake_hid
     alienfx::warnings
     GTest::gmock
     GTest::gtest_main)
 gtest_discover_tests(alienfx_sdk_packet_tests)
+
+# --- alienfx_sdk_transport_tests (M2b) -------------------------------------------
+# Replays the SAME packet_matrix against alienfx::hid_linux (the real backend)
+# linked against fake_hidapi instead of the real hidapi implementation, asserting
+# byte-identical output against the SAME golden files alienfx_sdk_packet_tests
+# checks above -- the fake-hidapi tier of Doc/linux_roadmap/
+# 16-testing-and-validation.md, proving hid_backend_linux.cpp's hidapi call
+# mapping without hardware, root, or a real hidraw node. Deliberately does not
+# link hidapi::hidraw anywhere in this executable's dependency graph -- verified
+# by `ldd` in Doc/linux_roadmap/17-milestones.md's M2b verification steps.
+add_executable(alienfx_sdk_transport_tests
+    alienfx_sdk/transport_backend_test.cpp)
+target_compile_definitions(alienfx_sdk_transport_tests PRIVATE
+    ALIENFX_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden/alienfx_sdk")
+target_link_libraries(alienfx_sdk_transport_tests PRIVATE
+    alienfx_test_fake_hidapi
+    alienfx::hid_linux
+    alienfx::warnings
+    GTest::gmock
+    GTest::gtest_main)
+gtest_discover_tests(alienfx_sdk_transport_tests)
 
 # --- gen_golden (M2a) ------------------------------------------------------------
 # The golden-vector generator. Run by hand (see tests/README.md) -- deliberately
@@ -103,5 +152,21 @@ gtest_discover_tests(alienfx_sdk_packet_tests)
 # committed artifacts, not something a test run should regenerate.
 add_executable(gen_golden support/gen_golden.cpp)
 target_link_libraries(gen_golden PRIVATE
-    alienfx_test_support
+    alienfx_test_fake_hid
+    alienfx::warnings)
+
+# --- dry_run_demo (M2b) -----------------------------------------------------------
+# Hand-run tool (not wired into ctest, same convention as gen_golden above)
+# demonstrating Doc/linux_roadmap/16-testing-and-validation.md's `--dry-run`
+# transport: forces alienfx_hid::SetDryRun(true) in main() before sending
+# anything, so it never opens or writes to a device regardless of how it's
+# linked. Links the real alienfx::hid_linux + hidapi::hidraw (not the fake) so it
+# doubles as a real diagnostic tool once M2c's device-open path exists --
+# dry-run being forced on is what keeps it safe today.
+add_executable(dry_run_demo support/dry_run_demo.cpp)
+target_compile_definitions(dry_run_demo PRIVATE ALIENFX_TESTING) # for TestSetDeviceState
+target_link_libraries(dry_run_demo PRIVATE
+    alienfx::sdk
+    alienfx::hid_linux
+    hidapi::hidraw
     alienfx::warnings)

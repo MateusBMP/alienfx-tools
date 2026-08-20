@@ -17,41 +17,20 @@
 // deliberately reusing that hatch is simpler and more honest than teaching the
 // fake to distinguish WaitForReady callers from WaitForBusy callers, which the
 // real transport has no way to do either.
+//
+// TransportKind/TransportEvent/ToToken/FromToken/PrintTo live in transport_log.h
+// (M2b) -- tests/support/fake_hidapi.h backs a different transport seam
+// (hid_backend_linux.cpp's hidapi calls, not this file's HidD_*/WriteFile/ReadFile
+// calls) but records into the same event shape, so both fakes produce golden
+// files in the same format.
 
 #include <cstdint>
 #include <deque>
-#include <ostream>
-#include <string>
 #include <vector>
 
+#include "transport_log.h"
+
 namespace alienfx_test {
-
-enum class TransportKind {
-	Out,     // HidD_SetOutputReport
-	Feat,    // HidD_SetFeature
-	Write,   // WriteFile (interrupt)
-	Read,    // ReadFile (interrupt)
-	GetFeat, // HidD_GetFeature
-	GetIn,   // HidD_GetInputReport
-	Sleep,   // Sleep(ms) -- bytes empty, sleepMs set
-};
-
-const char* ToToken(TransportKind kind);
-bool FromToken(const std::string& token, TransportKind* outKind);
-
-struct TransportEvent {
-	TransportKind kind;
-	std::vector<uint8_t> bytes;
-	unsigned sleepMs = 0;
-
-	bool operator==(const TransportEvent& other) const {
-		return kind == other.kind && bytes == other.bytes && sleepMs == other.sleepMs;
-	}
-	bool operator!=(const TransportEvent& other) const { return !(*this == other); }
-};
-
-// GTest/GMock look this up via ADL in TransportEvent's own namespace.
-void PrintTo(const TransportEvent& event, std::ostream* os);
 
 class FakeHidTransport {
 public:

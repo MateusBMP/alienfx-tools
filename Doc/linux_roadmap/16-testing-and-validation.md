@@ -102,6 +102,24 @@ writes `tests/golden/alienfx_sdk/<case>.txt`. Golden vectors are committed artif
 running `gen_golden` again should reproduce them byte-for-byte (an empty `git diff`),
 proving the generator is deterministic; it is not part of the build or test loop.
 
+### The fake-hidapi tier (M2b, done)
+
+`tests/support/fake_hidapi.{h,cpp}` is a second recording fake, one layer further down:
+where `fake_hid.cpp` (above) stubs `hid_backend.h`'s Windows-shaped seam directly,
+`fake_hidapi.cpp` stubs the *hidapi* C API instead — the seam
+`AlienFX-SDK/AlienFX_SDK/hid_backend_linux.cpp` (M2b's real backend) actually calls.
+`tests/alienfx_sdk/transport_backend_test.cpp` links that real file against this fake and
+replays the exact same `packet_matrix`, asserting byte-identical output against the exact
+same `tests/golden/alienfx_sdk/*.txt` `packet_builder_test.cpp` checks against `fake_hid`
+— proving the hidapi call mapping is correct with no hardware, no root, and no real
+`hidraw` node (`alienfx_sdk_transport_tests` doesn't even link `libhidapi*.so` — `ldd`
+confirms it). Not a fourth provenance tier alongside `source-derived`/`hand-derived`/
+`hardware-captured`: it reuses `source-derived`'s existing files, just replayed through
+one more layer of real code. See [17-milestones.md](17-milestones.md)'s M2b section for
+why this replaced the originally-planned "loopback/mock hidraw node" exit criterion —
+that needs `/dev/uhid` (root-only) or `usbip`, and a test suite that needs root stops
+being run.
+
 Do the same three-tier approach for [05](05-alienfan-sdk-thermal.md)'s Backend B ACPI
 call encoding (the 4-byte `{sub, arg1, arg2, 0}` buffer) — golden values are easy to
 produce since the existing v1 SDK's `RunMainCommand` escape hatch can dump the exact
@@ -109,12 +127,19 @@ buffer it sends for known operations, once a Windows machine is available.
 
 ## A `--dry-run` transport for manual testing without hardware
 
-Add a build-time or runtime option where the HID/ACPI transport layer prints the
-packet it *would* send (hex dump, with a human-readable decode of known fields) instead
-of writing to the device. This is useful independent of the golden-vector tests above:
-it lets a contributor without the specific hardware model in question sanity-check
-that their change produces a plausible packet, and lets a hardware owner without dev
-tooling capture what a specific CLI invocation actually sends for a bug report.
+**Status: done for the HID light path (M2b); the ACPI fan/light path is still a runtime
+option to add later.** `alienfx_hid::SetDryRun(true)` (or `ALIENFX_DRY_RUN=1`) makes every
+one of `hid_backend_linux.cpp`'s six HID calls print the packet it *would* send — a hex
+dump plus a decode of the fields the version tables document (report ID, and for V4
+specifically the `COMMV4_control` type/ID) — and return success without calling hidapi at
+all. `tests/support/dry_run_demo.cpp` is a hand-run demonstration of this (not wired into
+`ctest`, same convention as `gen_golden`): it forces dry run on before doing anything, so
+it's safe to run regardless of how it's linked, and prints a decoded V4
+Reset → SetColor → UpdateColors sequence. This is useful independent of the golden-vector
+tests above: it lets a contributor without the specific hardware model in question
+sanity-check that their change produces a plausible packet, and lets a hardware owner
+without dev tooling capture what a specific CLI invocation actually sends for a bug
+report — once M2c's device-open/CLI path exists to invoke it from.
 
 ## Hardware validation matrix
 

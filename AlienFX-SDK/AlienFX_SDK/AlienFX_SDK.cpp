@@ -881,12 +881,24 @@ namespace AlienFX_SDK {
 			case API_V5:
 			{
 				PrepareAndSend(COMMV5_status);
+#ifndef _WIN32
+				// hidapi's HIDIOCGFEATURE (Linux) reads buffer[0] as the report
+				// number being requested, same as Windows' HidD_GetFeature contract
+				// for a device with a declared Report ID -- but unlike PrepareAndSend's
+				// own local buffer, this one is never initialized before the call.
+				// V5's report ID is 0xcc (reportIDList[API_V5]), see
+				// Doc/linux_roadmap/04-alienfx-sdk-hid.md's "hidraw / hidapi mapping".
+				buffer[0] = reportIDList[version];
+#endif
 				if (HidD_GetFeature(devHandle, buffer, length))
 				//if (DeviceIoControl(devHandle, IOCTL_HID_GET_FEATURE, 0, 0, buffer, length, &written, NULL))
 					return buffer[2];
 			} break;
 			case API_V4:
 			{
+#ifndef _WIN32
+				buffer[0] = reportIDList[version]; // see the API_V5 case's comment above
+#endif
 				if (HidD_GetInputReport(devHandle, buffer, length)) {
 					//if (DeviceIoControl(devHandle, IOCTL_HID_GET_INPUT_REPORT, 0, 0, buffer, length, &written, NULL))
 					//DebugPrint("Status: " + to_string(buffer[2]) + "\n");
@@ -896,6 +908,9 @@ namespace AlienFX_SDK {
 			case API_V3: case API_V2:
 			{
 				PrepareAndSend(COMMV1_status);
+#ifndef _WIN32
+				buffer[0] = reportIDList[version]; // see the API_V5 case's comment above
+#endif
 				if (HidD_GetInputReport(devHandle, buffer, length))
 				//if (DeviceIoControl(devHandle, IOCTL_HID_GET_INPUT_REPORT, 0, 0, buffer, length, &written, NULL))
 					return buffer[0];

@@ -69,6 +69,41 @@ option(ALIENFX_WERROR       "Treat compiler warnings as errors"       OFF)
 include(AlienfxWarnings)     # -> alienfx::warnings (INTERFACE)
 include(AlienfxDependency)   # -> alienfx_require_package()
 
+# hidapi (M2b): required here, at the shallowest common ancestor of
+# AlienFX-SDK/AlienFX_SDK (alienfx::hid_linux, the real backend) and tests/
+# (fake_hidapi + the transport-backend tests) -- find_package()'s IMPORTED
+# targets (hidapi::include, hidapi::hidraw) are only visible in the calling
+# directory and its own subdirectories, so declaring this dependency in either
+# of those two sibling directories would hide it from the other.
+#
+# hidapi's own CMakeLists.txt declares a cmake_minimum_required() floor below
+# our 3.24 -- CMake 4.x hard-errors on that when built via FetchContent, the
+# gotcha cmake/AlienfxDependency.cmake:50-54 already flags. Scoped to this one
+# call only, per that comment's instruction, never project-wide.
+#
+# A second, unrelated gotcha found by actually exercising the gcc-fetched
+# preset: hidapi's linux/hid.c uses POSIX/GNU libc extensions (wcsdup, strdup,
+# strtok_r, O_CLOEXEC) with no feature-test macro of its own, relying on being
+# compiled as gnu11. This project sets CMAKE_C_EXTENSIONS OFF project-wide
+# (deliberately, for the GCC/Clang MS-extension-divergence check the top of
+# this file's CMAKE_CXX_EXTENSIONS comment explains) -- which FetchContent's
+# subdirectory inherits unless overridden, turning hidapi's own -std=gnu11 into
+# -std=c11 and hiding those declarations entirely. Scoped back on around this
+# one dependency only; only takes effect on the FetchContent (source-build)
+# branch -- the system-package branch links a prebuilt library and never
+# compiles hid.c at all.
+set(CMAKE_C_EXTENSIONS ON)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+alienfx_require_package(hidapi
+    GIT_REPOSITORY https://github.com/libusb/hidapi.git
+    GIT_TAG        hidapi-0.15.0)
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
+    unset(CMAKE_POLICY_VERSION_MINIMUM)
+endif()
+set(CMAKE_C_EXTENSIONS OFF)
+
 # --- Targets ---------------------------------------------------------------------
 # kiss_fft is vendored third-party DSP code that happens to live under alienfx-gui/.
 # It is deliberately NOT gated behind ALIENFX_BUILD_GUI: it has no Windows and no GUI

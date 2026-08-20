@@ -18,17 +18,26 @@ procedure" section is the template) and records the result below. Golden-green i
 the same as hardware-validated — that distinction is the entire reason M2 was split
 into sub-milestones in the first place (see [17-milestones.md](17-milestones.md)).
 
+The "Golden + transport (M2a/M2b)" column covers two now-done milestones at once: M2a's
+golden vectors (packet construction is byte-identical to the pre-port source) and M2b's
+replay of those same vectors through the real hidapi-backed transport
+(`hid_backend_linux.cpp` against `tests/support/fake_hidapi.cpp`) — neither needs
+hardware, and both are done for all 7 versions. Neither substitutes for the
+"Hardware-validated" column: M2b's backend has never opened a real device (that's M2c's),
+so "transport code is right" and "transport code works against silicon" remain distinct
+facts, same principle as M2a vs. M2d for V4.
+
 ## Per-version ledger
 
-| API | Device class | Golden vectors (M2a) | Linux detection | Hardware-validated | Tester / machine | Notes |
+| API | Device class | Golden + transport (M2a/M2b) | Linux detection | Hardware-validated | Tester / machine | Notes |
 |---|---|---|---|---|---|---|
-| V2 | Old notebooks (m14x/17x, 13R1/R2) | Pending M2a | Not started (M2c) | **Untested** — no known V2 device available to any current contributor | — | Legacy `SavePowerBlock` power-button sequence also untested |
-| V3 | Old notebooks | Pending M2a | Not started (M2c) | **Untested** | — | Shares detection code with V2 |
-| V4 | Modern notebooks/desktops/Aurora R8+ ("tron") | Pending M2a | **Broken** — Finding 1, `local/test-machine.md:28-54`; fix tracked in M2c | **Untested**, but a real device exists: `187c:0550` on the fork's test machine (Alienware m15 R6). Blocked on M2c's fix, then M2d's udev-permission work | — | Once unblocked, this is the milestone's "prove it end to end" version — see M2d in [17](17-milestones.md) |
-| V5 | Internal per-key RGB keyboards (Darfon, VID `0x0d62`) | Pending M2a | **No Linux equivalent as written** — Finding 2, `local/test-machine.md:56-87`; needs the M2e redesign | **Untested**. A physical device exists (`0d62:3740` on the test machine) but `devices.csv:130` marks this exact model "Unused" — validating it may not be worth doing even after M2e lands | — | Feature-report-only detection (`Usage == 0xcc`) is one of doc 16's four fragile spots |
-| V6 | Monitors (VID `0x187c` or `0x0424`) | Pending M2a | Not started (M2c) | **Untested** — no monitor device available to any current contributor | — | XOR checksum (doc 04) is one of doc 16's four fragile spots; `SetBrightness` is a documented no-op for V6 |
-| V7 | Mice (VID `0x0461`, Primax) | Pending M2a | Not started (M2c) | **Untested** | — | Write-then-read transport requirement is one of doc 16's four fragile spots |
-| V8 | External keyboards (VID `0x04f2`, Chicony, AW410k/510k) | Pending M2a | Not started (M2c) | **Untested** | — | Feature-vs-interrupt size heuristic is one of doc 16's four fragile spots |
+| V2 | Old notebooks (m14x/17x, 13R1/R2) | Done | Not started (M2c) | **Untested** — no known V2 device available to any current contributor | — | Legacy `SavePowerBlock` power-button sequence also untested |
+| V3 | Old notebooks | Done | Not started (M2c) | **Untested** | — | Shares detection code with V2 |
+| V4 | Modern notebooks/desktops/Aurora R8+ ("tron") | Done | **Broken** — Finding 1, `local/test-machine.md:28-54`; fix tracked in M2c | **Untested**, but a real device exists: `187c:0550` on the fork's test machine (Alienware m15 R6). Blocked on M2c's fix, then M2d's udev-permission work | — | Once unblocked, this is the milestone's "prove it end to end" version — see M2d in [17](17-milestones.md) |
+| V5 | Internal per-key RGB keyboards (Darfon, VID `0x0d62`) | Done | **No Linux equivalent as written** — Finding 2, `local/test-machine.md:56-87`; needs the M2e redesign | **Untested**. A physical device exists (`0d62:3740` on the test machine) but `devices.csv:130` marks this exact model "Unused" — validating it may not be worth doing even after M2e lands | — | Feature-report-only detection (`Usage == 0xcc`) is one of doc 16's four fragile spots |
+| V6 | Monitors (VID `0x187c` or `0x0424`) | Done | Not started (M2c) | **Untested** — no monitor device available to any current contributor | — | XOR checksum (doc 04) is one of doc 16's four fragile spots; `SetBrightness` is a documented no-op for V6 |
+| V7 | Mice (VID `0x0461`, Primax) | Done | Not started (M2c) | **Untested** | — | Write-then-read transport requirement is one of doc 16's four fragile spots |
+| V8 | External keyboards (VID `0x04f2`, Chicony, AW410k/510k) | Done | Not started (M2c) | **Untested** | — | Feature-vs-interrupt size heuristic is one of doc 16's four fragile spots |
 
 ## How to add a validated row
 

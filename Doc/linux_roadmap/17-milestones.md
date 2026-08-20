@@ -117,23 +117,86 @@ calls are factored behind `hid_backend.h`.
 
 ### M2b — hidapi transport backend
 
-**Goal**: the six Windows HID functions (`HidD_SetOutputReport`/`SetFeature`/`GetFeature`,
-`WriteFile`, `ReadFile`, `HidD_GetInputReport`) reimplemented as thin wrappers over
-`hidapi-hidraw`, per [04](04-alienfx-sdk-hid.md)'s mapping table — `PrepareAndSend` and
-all packet-construction code stay byte-identical. Includes the `--dry-run` transport
-[16](16-testing-and-validation.md) asks for.
-**Exit criteria**: M2a's golden tests pass unchanged when driven through the real hidapi
-backend over a loopback/mock hidraw node; `--dry-run` prints a decoded packet.
-**Size**: ~200 lines (`hid_backend_linux.cpp`, CMake `hidapi` dependency via
-`alienfx_require_package()`).
-**Risk**: low — mechanical once M2a's seam exists; the CMake gotcha already flagged in
-`cmake/AlienfxDependency.cmake:50-54` (hidapi's own `cmake_minimum_required` floor) is the
-only known snag.
+**Status: done.** `hid_backend_linux.{h,cpp}` and `tests/support/fake_hidapi.{h,cpp}`
+exist; M2a's golden vectors pass unchanged through the real backend.
+
+**Goal**: the eight Windows-shaped `hid_backend.h` symbols
+(`HidD_SetOutputReport`/`SetFeature`/`GetFeature`/`GetInputReport`, `WriteFile`,
+`ReadFile`, `CloseHandle`, `Sleep`) reimplemented as thin wrappers over `hidapi`, per
+[04](04-alienfx-sdk-hid.md)'s mapping table — `PrepareAndSend` and all packet-construction
+code stay byte-identical. Includes the `--dry-run` transport [16](16-testing-and-validation.md)
+asks for.
+
+**Exit criteria — restructured before implementation, not after.** The milestone as
+originally scoped asked for "M2a's golden tests pass unchanged when driven through the
+real hidapi backend **over a loopback/mock hidraw node**." That's not achievable safely:
+a real loopback hidraw node needs `/dev/uhid` (root-only) or `usbip`, and a test suite
+that needs root is a test suite that stops being run — the same "golden-green isn't the
+same as hardware-validated" reasoning that split M2 into sub-milestones in the first
+place, applied one level down. Two changes, made before writing any M2b code:
+
+1. **M2b cannot open a device, by construction.** All device opening (`hid_open_path`,
+   `hid_enumerate`, VID/PID resolution, the 33-vs-34 report-length fix) stays wholly
+   M2c's. `hid_backend_linux.cpp` only ever operates on a handle someone else opened —
+   verified after the fact by `nm -D` on both `alienfx_sdk_transport_tests` and
+   `dry_run_demo`: neither references `hid_open`/`hid_open_path`/`hid_enumerate`/
+   `hid_init` at all.
+2. **The exit criterion is a fake-hidapi replay, not a loopback node.** The *real*
+   backend is linked against `tests/support/fake_hidapi.cpp` (a stub of the hidapi C API,
+   mirroring M2a's `fake_hid.cpp`) and driven through M2a's existing `packet_matrix`,
+   asserting byte-identical output against the same committed
+   `tests/golden/alienfx_sdk/*.txt` — proving the hidapi call mapping without hardware,
+   root, or a real hidraw node. `alienfx_sdk_transport_tests` doesn't even link
+   `libhidapi*.so` (`ldd` confirms it), so this is stronger than "doesn't touch a real
+   device" — it structurally *cannot*.
+
+Also added a safety posture the roadmap had deferred to M10: since the six wrappers are
+the only place bytes can leave the process, a **vendor allowlist is enforced right
+there** (the five VIDs in [15](15-packaging-and-permissions.md)'s table), refusing
+`HidD_SetOutputReport`/`SetFeature`/`WriteFile` for any other vendor unless
+`ALIENFX_ALLOW_ANY_VENDOR=1` is set; `ALIENFX_DRY_RUN=1` forces decode-and-print instead
+of sending, for any vendor.
+
+**Four porting defects found and fixed while implementing this milestone** (full writeup
+in [04](04-alienfx-sdk-hid.md)):
+1. `GetDeviceStatus`'s `Get*` calls passed an uninitialized `buffer[0]` — hidapi (and the
+   underlying `HIDIOCGFEATURE`/`HIDIOCGINPUT` ioctls) read that byte as the *requested*
+   report number. Fixed with three additive `#ifndef _WIN32` lines in `AlienFX_SDK.cpp`
+   (`git diff -U0 aaf9d43 -- AlienFX_SDK.cpp | grep '^-[^-]'` stays empty, same M1/M2a
+   convention).
+2. `hid_read_timeout`'s 0-on-timeout/-1-on-error split had to be mapped onto Windows'
+   `ReadFile`-returns-`TRUE`-with-zero-bytes-on-timeout contract, or V7's mandatory
+   read-after-write would report failure on every call.
+3. `HidD_SetOutputReport` is a control-endpoint transfer; `hid_send_output_report`
+   matches it but only exists since hidapi 0.15.0 — older hidapi falls back to
+   `hid_write` (a genuinely different, interrupt, transfer) at compile time, with
+   `ALIENFX_HID_OUTPUT_MODE=report|write` to pick at runtime once both exist, so M2d can
+   settle this against real hardware without a rebuild.
+4. hidapi's own `linux/hid.c` needs `gnu11`, not `c11` (`wcsdup`/`strdup`/`strtok_r`/
+   `O_CLOEXEC` are POSIX/GNU extensions with no feature-test macro of their own) — this
+   project's project-wide `CMAKE_C_EXTENSIONS OFF` broke the `gcc-fetched` preset's
+   from-source build until scoped back to `ON` around just the `hidapi`
+   `alienfx_require_package()` call.
+
+**Size**: ~250 lines `hid_backend_linux.{h,cpp}`, ~150 lines `fake_hidapi.{h,cpp}`,
+~180 lines `transport_backend_test.cpp`, CMake `hidapi` dependency via
+`alienfx_require_package()` (declared at the top-level `CMakeLists.txt`, not in
+`AlienFX-SDK/AlienFX_SDK/CMakeLists.txt` — `find_package()`'s IMPORTED targets are only
+visible in the calling directory and its own subdirectories, and `AlienFX-SDK/AlienFX_SDK`
+and `tests/` are siblings). 3 additive lines in `AlienFX_SDK.cpp` (defect 1).
+**Risk**: realized as documented above, not left implicit — mechanical once M2a's seam
+existed; the CMake gotcha already flagged in `cmake/AlienfxDependency.cmake:50-54`
+(hidapi's own `cmake_minimum_required` floor) did **not** fire on this hidapi version, but
+the C-extensions gotcha (defect 4, unflagged going in) did.
 
 ### M2c — Linux enumeration & detection
 
 **Goal**: replace SetupAPI device enumeration (`AlienFXProbeDevice`, `AlienFXInitialize`)
-with udev/hidraw enumeration. Fixes **Finding 1**
+with udev/hidraw enumeration — including the actual `hid_open_path()`/`hid_enumerate()`
+calls M2b deliberately left out, and a call to `alienfx_hid::RegisterDevice()`
+immediately after each successful open (`hid_backend_linux.h`, M2b) so M2b's vendor
+allowlist gate has a VID to check without falling back to a `hid_get_device_info()` query
+per write. Fixes **Finding 1**
 (`local/test-machine.md:28-54`): Linux HID report descriptors don't include the leading
 report-ID byte Windows' `OutputReportByteLength` counts, so this machine's 34-byte V4
 controller parses as 33 and is silently undetectable. **Fix is to normalise the parsed

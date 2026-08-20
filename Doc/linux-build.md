@@ -128,12 +128,15 @@ installation first, and falls back to fetching source via `FetchContent` only if
 fails. This matches how AUR/deb/rpm packaging expects a build to behave — see
 [`Doc/linux_roadmap/02-build-system.md`](linux_roadmap/02-build-system.md).
 
-As of M1, the only such dependency is still GoogleTest (built only when
-`ALIENFX_BUILD_TESTS=ON`) — M1 added no new third-party dependencies, only first-party
-targets (`alienfx::compat`, `alienfx::common`, `alienfx::sdk_headers`). Configure output
-tells you which acquisition path was taken:
+As of M2b: `hidapi` (`hidapi-0.15.0`, required at the top-level `CMakeLists.txt` — see
+`Doc/linux_roadmap/02-build-system.md`'s note on why it isn't declared alongside
+`AlienFX-SDK/AlienFX_SDK/CMakeLists.txt`'s other targets) and GoogleTest (built only when
+`ALIENFX_BUILD_TESTS=ON`). Configure output tells you which acquisition path was taken
+for each:
 
 ```
+-- alienfx: dependency 'hidapi' -> system package (find_package)
+-- alienfx: dependency 'hidapi' -> built from source (FetchContent)
 -- alienfx: dependency 'googletest' -> system package (find_package)
 -- alienfx: dependency 'googletest' -> built from source (FetchContent)
 ```

@@ -18,10 +18,16 @@ tests/
   README.md                   # this file
   kiss_fft/                   # M0 (test source deferred to a follow-up pass)
   alienfx_sdk/                # M2a — packet_builder_test.cpp, protocol_invariants_test.cpp
-  golden/alienfx_sdk/         # M2a — golden byte vectors, see below
-  support/                    # M2a — fake_hid (recording transport), golden_vector
+                               # M2b — transport_backend_test.cpp
+  golden/alienfx_sdk/         # M2a — golden byte vectors, see below (shared by M2a and M2b)
+  support/                    # M2a — transport_log (TransportKind/TransportEvent, shared by
+                               #       both fakes below), fake_hid (recording transport for
+                               #       hid_backend.h's Windows-shaped seam), golden_vector
                                #       (reader/writer/hex PrintTo), packet_matrix
                                #       (shared version×operation table), gen_golden
+                               # M2b — fake_hidapi (recording transport for the *hidapi* C
+                               #       API instead — the seam hid_backend_linux.cpp calls),
+                               #       dry_run_demo (hand-run --dry-run demonstration)
 ```
 
 One flat `tests/CMakeLists.txt` declares every test executable — the *source* tree
@@ -54,7 +60,9 @@ machine, using two of the three provenance tiers below — see
 was fixed in M0, before any vector existed, so M2a wasn't also inventing conventions
 while porting the HID SDK; M2a extends it (strict superset — every M0-format line is
 still valid) to express transport kind and multi-packet sequences, which the four
-fragile spots below specifically need.
+fragile spots below specifically need. M2b (`transport_backend_test.cpp`) reuses these
+same committed files unchanged — see `Doc/linux_roadmap/16-testing-and-validation.md`'s
+"fake-hidapi tier" for why that's not a fourth provenance tier of its own.
 
 ### Provenance tiers
 
