@@ -7,18 +7,24 @@ for how that invariant is maintained). Design decisions and rationale live in
 [`Doc/linux_roadmap/02-build-system.md`](linux_roadmap/02-build-system.md); this doc is
 just the commands.
 
-As of this writing, the Linux port is at Milestone M0 — build scaffolding only. The
-one target that actually builds and is tested is the vendored `kiss_fft` DSP library;
-everything else (`AlienFX_SDK`, the CLIs, the daemon, the GUI) is still on the roadmap.
+As of this writing, the Linux port has completed Milestone M1 — the platform compat
+layer. Real targets that build and are tested: the vendored `kiss_fft` DSP library
+(M0), `alienfx::compat` (the `win_compat.h` header, M1), `alienfx::common`
+(`CustomMutex`/`ThreadHelper`, M1), and `alienfx::sdk_headers` (`AlienFX_SDK.h` +
+`alienfx-controls.h`, headers only — M2 turns this into a real static library once
+`AlienFX_SDK.cpp` itself is ported). The CLIs, the daemon, and the GUI are still on the
+roadmap.
 
 ## Requirements
 
 - CMake >= 3.24, Ninja
 - GCC or Clang (a C++17 / C11 compiler)
-- pkg-config (used by dependencies from M1 onward)
+- pthreads (`Threads::Threads`, used by `alienfx::common`'s `std::thread`/
+  `std::shared_mutex` backend as of M1)
+- pkg-config (used by dependencies from M2 onward, e.g. `hidapi`/`libusb`)
 
-Nothing else is required for M0 itself — GoogleTest is fetched automatically if not
-already installed as a system package (see "Dependencies" below).
+Nothing beyond the above is required through M1 — GoogleTest is fetched automatically
+if not already installed as a system package (see "Dependencies" below).
 
 ## Quick start
 
@@ -74,6 +80,28 @@ see
 [`Doc/linux_roadmap/18-windows-verification.md`](linux_roadmap/18-windows-verification.md)
 for why it matters and what the two real exceptions to "never touched" are.
 
+**Since M1**: some Linux porting work now edits files MSBuild also compiles
+(`AlienFX_SDK.h`, `Common/CustomMutex.*`, `Common/ThreadHelper.*` so far — the milestone
+docs track which ones). M0's "adds only new files" proof-by-construction doesn't cover
+these; the replacement convention is that every such edit must be purely additive
+(original lines preserved verbatim, new behavior wrapped in an `#ifdef _WIN32` arm), and
+the check is a diff against the last commit known to build clean, expecting zero deleted
+lines (a genuine `-`, not a `--` file marker or an EOF-newline artifact):
+
+```bash
+git diff -U0 <last-known-good-sha> -- 'AlienFX-SDK/AlienFX_SDK/*.h' \
+                                       'Common/CustomMutex.*' \
+                                       'Common/ThreadHelper.*' \
+  | grep '^-[^-]'                                              # expect: empty
+```
+
+This is a documented convention, not an automated gate — consistent with this project's
+no-CI stance and with how the `.vcxproj` check above already works — and it is not
+airtight (a stray `#pragma`, a moved `#include`, or `#ifdef` nesting error would slip
+past a line-count check). It does not replace an actual Windows build; see
+[`Doc/linux_roadmap/18-windows-verification.md`](linux_roadmap/18-windows-verification.md)
+for the full procedure to verify one when a Windows machine is available.
+
 ## Options
 
 Set with `-D<NAME>=ON|OFF` on top of a preset, e.g.
@@ -100,8 +128,10 @@ installation first, and falls back to fetching source via `FetchContent` only if
 fails. This matches how AUR/deb/rpm packaging expects a build to behave — see
 [`Doc/linux_roadmap/02-build-system.md`](linux_roadmap/02-build-system.md).
 
-As of M0, the only such dependency is GoogleTest (built only when
-`ALIENFX_BUILD_TESTS=ON`). Configure output tells you which path was taken:
+As of M1, the only such dependency is still GoogleTest (built only when
+`ALIENFX_BUILD_TESTS=ON`) — M1 added no new third-party dependencies, only first-party
+targets (`alienfx::compat`, `alienfx::common`, `alienfx::sdk_headers`). Configure output
+tells you which acquisition path was taken:
 
 ```
 -- alienfx: dependency 'googletest' -> system package (find_package)

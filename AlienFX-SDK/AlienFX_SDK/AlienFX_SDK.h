@@ -1,5 +1,9 @@
 #pragma once
+#ifdef _WIN32
 #include <wtypes.h>
+#else
+#include "win_compat.h"
+#endif
 #include <vector>
 #include <string>
 
@@ -10,6 +14,43 @@
 using namespace std;
 
 namespace AlienFX_SDK {
+
+#ifndef _WIN32
+	// `byte` here is *not* a Windows typedef -- on MSVC it comes from rpcndr.h and
+	// means `unsigned char`. `using namespace std;` above means the unqualified name
+	// would otherwise resolve to std::byte (a scoped enum, <cstddef>), which rejects
+	// the brace-initializer-list data tables this SDK is built from
+	// (`const byte COMMV1_color[]{ 1, 0x03 };` -- alienfx-controls.h and this file
+	// use this pattern ~124 times combined). Declaring `byte` at namespace scope
+	// wins over the injected std::byte by ordinary unqualified name lookup rules
+	// (a namespace member hides a name brought in by a using-directive), so this one
+	// line is a drop-in equivalent of the Windows meaning without touching every
+	// call site. Verified against GCC 16 and Clang 22 under
+	// -std=c++17 -Wall -Wextra -Wpedantic -Werror.
+	//
+	// This also incidentally resolves a pre-existing bug: AlienFX_SDK.h declares
+	// `SetMultiColor(vector<byte>*, ...)` while AlienFX_SDK.cpp defines it as
+	// `SetMultiColor(vector<UCHAR>*, ...)` -- identical on MSVC (byte == UCHAR ==
+	// unsigned char) but a link error the moment `byte` means std::byte. This
+	// typedef makes both spellings the same type again.
+	using byte = uint8_t;
+
+	// Anonymous struct-inside-union (MS/C11 extension) is used throughout this
+	// header for the color/mask types the HID protocol is built on (see
+	// Afx_colorcode, Afx_light, Afx_groupLight, and the two PID/VID unions below).
+	// GCC and Clang both accept it, but warn: Clang under -Wgnu-anonymous-struct,
+	// GCC under plain -Wpedantic -- and alienfx::warnings enables -Wpedantic with
+	// -Werror on the gcc/clang presets, so this would otherwise fail the build.
+	// Silencing rather than rewriting: these structs are the on-wire/on-disk data
+	// model, and reworking them risks subtly changing packing/alignment (see
+	// AlienFX_SDK.h's static_assert coverage in tests/alienfx_sdk/sdk_headers_test.cpp
+	// for what pins that layout down instead).
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Wpedantic"
+	#ifdef __clang__
+	#pragma GCC diagnostic ignored "-Wgnu-anonymous-struct"
+	#endif
+#endif
 
 	// Statuses for v1-v3
 	#define ALIENFX_V2_READY 0x10
@@ -336,5 +377,9 @@ namespace AlienFX_SDK {
 		// get light flags (Power, indicator) by PID
 		int GetFlags(WORD pid, WORD lightid);
 	};
+
+#ifndef _WIN32
+	#pragma GCC diagnostic pop
+#endif
 
 }

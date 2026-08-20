@@ -28,16 +28,48 @@ shape right here rather than patching it repeatedly later.
 
 ## M1 — Platform compat layer
 
-**Goal**: `win_compat.h` and the CRT/threading/mutex replacements exist and compile
-against the actual SDK headers that include `<wtypes.h>` today.
+**Status: done.** `win_compat.h` and the CRT/threading/mutex replacements exist and
+compile against the actual SDK headers that include `<wtypes.h>` today.
 **Doc**: [03](03-platform-abstraction.md).
-**Exit criteria**: `AlienFX_SDK.h`, `Common/CustomMutex.h`, `Common/ThreadHelper.h`
-compile on Linux without pulling in real Windows headers.
-**Size**: ~80 lines of new shim code, plus per-file `#ifdef` seams touching maybe a
-dozen headers.
-**Risk**: low individually, but every later milestone depends on this being *correct*
-(especially the anonymous struct-in-union handling, since it's inside the color/mask
-types M2 depends on) — worth extra review time here.
+**Exit criteria — strengthened from the original milestone plan**: the original wording
+("`AlienFX_SDK.h`, `Common/CustomMutex.h`, `Common/ThreadHelper.h` compile on Linux
+without pulling in real Windows headers") was too weak — a header can compile while
+silently getting the layout of the on-wire color/mask types wrong, which is exactly the
+risk this milestone itself flagged as needing extra review. M1 shipped with that risk
+mechanically checked instead of asserted:
+  - `AlienFX_SDK.h`, `alienfx-controls.h`, `Common/CustomMutex.h`, `Common/ThreadHelper.h`
+    compile on Linux without pulling in real Windows headers — under `-Wall -Wextra
+    -Wpedantic -Werror` on both GCC and Clang (the `gcc`/`clang` presets), not just a
+    bare compile.
+  - The layout of all five anonymous-union types the HID protocol depends on
+    (`Afx_colorcode`, `Afx_light`, `Afx_groupLight`, and the PID/VID unions on both
+    `Functions` and `Afx_device`) is pinned down by `offsetof`/`sizeof` `static_assert`s
+    in `tests/alienfx_sdk/sdk_headers_test.cpp`, not left to "it compiled, so it's
+    probably fine."
+  - `CustomMutex`'s reader/writer exclusivity and `ThreadHelper`'s do/while first-tick,
+    join-on-`Stop()`, and manual-reset restart quirk are asserted by
+    `tests/common/*_test.cpp`, re-run via `ctest --repeat until-fail:50` (concurrency
+    tests that pass once prove little) and verified clean under AddressSanitizer and
+    ThreadSanitizer by hand.
+  - All of the above green under all five `CMakePresets.json` presets
+    (`dev`/`gcc`/`clang`/`gcc-fetched`/`system-only`).
+**Size — corrected from the original estimate**: ~80 lines of shim code was roughly
+right (`win_compat.h` itself), but "`#ifdef` seams touching maybe a dozen headers" was
+not — only 3 of the 8 originally-surveyed `<wtypes.h>`-including files are in M1's actual
+scope (`AlienFX_SDK.h`, `Common/CustomMutex.h`, `Common/ThreadHelper.h`); the rest belong
+to M4 (`RegHelperLib.h`, `ConfigMon.h`), M7 (`alienfx-gui.h`), M9 (`LFXUtil.cpp`), or are
+never ported (`alienfan-SDK.h`, both copies). See
+[03](03-platform-abstraction.md) for the corrected table.
+**Risk — realized and addressed, not just flagged**: the anonymous struct-in-union
+handling did need extra review, in a different place than expected — not the union
+layout itself (GCC/Clang accept it once the right warning is silenced) but **the
+silencing flag originally proposed for it was wrong** (`-Wno-microsoft-anon-tag` doesn't
+match either compiler's actual warning under `-std=c++17`; see 03's corrected version).
+A second, unplanned risk surfaced during implementation: `AlienFX_SDK.cpp`'s real
+brace-elision call sites (`:918,999,1077`) don't compile clean under `-Werror` either,
+for a related but distinct reason (`-Wmissing-field-initializers`/`-Wmissing-braces`,
+not the anon-struct warning) — recorded in 03 as a flagged item for M2, since
+`AlienFX_SDK.cpp` itself is out of M1's scope.
 
 ## M2 — HID light SDK port
 

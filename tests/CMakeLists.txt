@@ -28,5 +28,34 @@ target_link_libraries(kiss_fft_tests PRIVATE
     GTest::gtest_main)
 gtest_discover_tests(kiss_fft_tests)
 
-# M2+: add_executable(alienfx_sdk_tests alienfx_sdk/packet_builder_test.cpp ...)
+# --- compat (M1) -------------------------------------------------------------
+add_executable(compat_tests compat/win_compat_test.cpp)
+target_link_libraries(compat_tests PRIVATE
+    alienfx::compat
+    alienfx::warnings
+    GTest::gmock
+    GTest::gtest_main)
+gtest_discover_tests(compat_tests)
+
+# --- common (M1) -------------------------------------------------------------
+add_executable(common_tests
+    common/custom_mutex_test.cpp
+    common/thread_helper_test.cpp)
+target_link_libraries(common_tests PRIVATE
+    alienfx::common
+    alienfx::warnings
+    GTest::gmock
+    GTest::gtest_main)
+gtest_discover_tests(common_tests)
+
+# --- alienfx_sdk (M1: headers only; M2 adds packet-builder sources here) -------
+add_executable(alienfx_sdk_tests alienfx_sdk/sdk_headers_test.cpp)
+target_link_libraries(alienfx_sdk_tests PRIVATE
+    alienfx::sdk_headers
+    alienfx::warnings
+    GTest::gmock
+    GTest::gtest_main)
+gtest_discover_tests(alienfx_sdk_tests)
+
+# M2+: extend alienfx_sdk_tests with alienfx_sdk/packet_builder_test.cpp,
 #      reading golden vectors from tests/golden/alienfx_sdk/ -- see tests/README.md.
