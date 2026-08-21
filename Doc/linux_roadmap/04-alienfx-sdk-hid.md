@@ -34,7 +34,7 @@ each; this is the short version of *where in this doc* each one lives:
 |---|---|---|
 | **M2a** | Compile `Functions` behind a recording fake transport; freeze `source-derived` golden vectors for all 7 versions; `hand-derived` tests for the 4 fragile spots | "The transport core", all seven "Per-version command tables" subsections, "Timing is not optional" |
 | **M2b** | Real `hidapi` transport backend + `--dry-run` (done) | "hidraw / hidapi mapping", "M2b's decided mapping and the four defects it found" |
-| **M2c** | udev/hidraw enumeration; fixes the 33-vs-34 report-length bug | "API version enum and detection" |
+| **M2c** | hidraw enumeration + sysfs-based detection; fixes the 33-vs-34 report-length bug (done) | "API version enum and detection", "Linux enumeration path (M2c), for comparison" |
 | **M2d** | Live API_V4 validation | N/A — hardware step, see `local/test-machine.md` |
 | **M2e** | V5 collection-aware detection design | "API version enum and detection", the V5/Darfon row |
 
@@ -107,21 +107,59 @@ default:
 **Two confirmed Linux porting defects in this switch, found by probing real hardware**
 (`local/test-machine.md`, both are **M2c**'s to fix, not M2a's):
 
-- **Finding 1 (`local/test-machine.md:28-54`)**: `caps.OutputReportByteLength` on Windows
-  *includes* the leading report-ID byte; a Linux HID report descriptor's Report Count
-  does not when the device has no `85 xx` Report ID item. A real 34-byte V4 controller
+- **Finding 1 (`local/test-machine.md:28-54`) — fixed in M2c.** `caps.OutputReportByteLength`
+  on Windows *includes* the leading report-ID byte; a Linux HID report descriptor's Report
+  Count does not when the device has no `85 xx` Report ID item. A real 34-byte V4 controller
   (this fork's test machine: `187c:0550`) therefore parses as 33 on Linux, matches no
   `case` above, and is silently left at `API_UNKNOWN` — no error, no lights. **Fix: add 1
   to the parsed Report Count before this switch to normalize to the Windows convention,
   not add a `case 33`** — hidraw `write(2)` still expects the leading report-ID byte on
-  the wire, so 34 remains the true on-wire size either way.
-- **Finding 2 (`local/test-machine.md:56-87`)**: the Darfon `case 0x0d62` condition is
-  evaluated by Windows *per top-level HID collection* (each gets its own device
-  interface path there), but Linux hidraw exposes a whole composite interface as one
-  node — including sibling collections (e.g. the boot-keyboard LED output report) that
-  make `OutputReportByteLength == 0` false even when the vendor-usage V5 collection is
-  present. A literal port never detects V5. Needs a deliberate redesign (M2e), not a
-  mechanical translation of this condition.
+  the wire, so 34 remains the true on-wire size either way. Implemented in
+  `hid_report_descriptor.cpp`'s `ParseHidReportDescriptor`: the `+1` is applied only when
+  a report of that kind exists at all (an all-zero collection stays byte length 0, not 1 —
+  Finding 2's eventual fix depends on that zero being reachable). Confirmed live against
+  `187c:0550`'s real descriptor, both in `tests/alienfx_sdk/report_descriptor_test.cpp`
+  and by running `tests/support/probe_demo.cpp` against the actual hidraw node.
+- **Finding 2 (`local/test-machine.md:56-87`) — still open, narrowed by M2c.** The Darfon
+  `case 0x0d62` condition is evaluated by Windows *per top-level HID collection* (each gets
+  its own device interface path there), but Linux hidraw exposes a whole composite
+  interface as one node — including sibling collections (e.g. the boot-keyboard LED output
+  report) that make `OutputReportByteLength == 0` false even when the vendor-usage V5
+  collection is present. A literal port never detects V5. Needs a deliberate redesign
+  (M2e), not a mechanical translation of this condition.
+
+  **What M2c found while building the enumeration path that narrows this for M2e**:
+  `hid_enumerate()` (hidapi's hidraw backend) already yields one `hid_device_info` entry
+  *per top-level collection*, each carrying that collection's own `usage`/`usage_page` —
+  confirmed live: this fork's test machine's Darfon node (`0d62:3740`, one hidraw path)
+  enumerates as at least two entries, the first with `usage_page=0x0001`/`usage=0x0006`
+  (Generic Desktop/Keyboard — the boot-keyboard collection) ahead of the vendor-usage one.
+  So the *usage* half of Windows' per-collection view is already available on Linux, for
+  free, at enumeration time — M2c's `hid_enumerate_linux.cpp` deliberately dedupes these
+  down to one `HidNode` per hidraw path (keeping the first entry's usage) since
+  `AlienFXProbeDevice` only ever needs one node per path to decide what to open. What's
+  still missing is the *report-length* half: `hid_report_descriptor.cpp`'s parser
+  deliberately aggregates Output/Feature bit lengths across the **whole node** (every
+  top-level collection in one descriptor blob), not per collection — this is what makes
+  it correctly reproduce Finding 2 (the boot-keyboard's Output report keeps the aggregate
+  non-zero, so V5 stays undetected, matching Windows' real per-collection behavior for a
+  *different* reason than a literal port would). M2e's job is narrower than originally
+  scoped: re-associate each top-level collection's *own* report lengths with the
+  `usage`/`usage_page` hidapi already hands back per-collection (e.g. bucket
+  `hid_report_descriptor.cpp`'s existing per-Report-ID accumulation by collection depth
+  instead of merging it into one whole-node max) — not "enumerate sibling hidraw nodes by
+  USB interface", since there is only one hidraw node to begin with. Confirmed live: this
+  machine's Darfon node reports `out=2 feat=8` (whole-node aggregate) via `probe_demo`,
+  matching `feat=8`'s prediction in `local/test-machine.md` ("7 bytes... 8 with its ID")
+  exactly.
+
+  **Accepted gap, not exercised by any known device**: this same whole-node aggregation
+  means a hypothetical composite `0x187c` device whose sibling top-level collections have
+  *different* Output report sizes (e.g. one at 34 bytes, another at 65) could misdetect
+  V4 as V6 — `PrepareAndSend`'s V6 arm (`WriteFile`, `0xFF`-padded) is a materially
+  different wire protocol from V4's (`HidD_SetOutputReport`). No device on this fork's
+  test machine has this shape; a proper fix is the same per-collection TLC-scoped
+  accumulation M2e needs for Finding 2, not a separate mechanism.
 
 Enumeration path: `SetupDiGetClassDevs(GUID_DEVINTERFACE_HID, DIGCF_PRESENT |
 DIGCF_DEVICEINTERFACE)` → `SetupDiEnumDeviceInterfaces` → `CreateFile(DevicePath,
@@ -130,6 +168,23 @@ GENERIC_READ|GENERIC_WRITE, FILE_SHARE_READ|FILE_SHARE_WRITE)` → `HidD_GetAttr
 `:926-969` `AlienFXEnumDevices` used by the GUI). Manufacturer/product strings via
 `HidD_GetManufacturerString`/`HidD_GetProductString` (`:243-252`). Comm timeouts
 `{100,0,0,10,200}` set at `:180,:252`.
+
+**Linux enumeration path (M2c), for comparison**: `hid_enumerate_linux.cpp`'s
+`EnumerateNodes` calls hidapi's `hid_enumerate(vid, pid)` (no device opened), pre-filters
+to the five known AlienFX vendors, dedupes hidapi's one-entry-per-top-level-collection
+results down to one `HidNode` per hidraw path, then reads
+`/sys/class/hidraw/hidrawN/device/report_descriptor` directly and parses it with
+`hid_report_descriptor.cpp` — **not** `hid_open_path()` followed by
+`hid_get_report_descriptor()`. This is a deliberate departure from the obvious literal
+port, not an oversight: the sysfs attribute is world-readable (confirmed on this fork's
+test machine: `-r--r--r--`, versus the hidraw device node's `crw------- root:root`, no
+udev rule until M2d), so detection needs no privilege at all. Opening
+(`alienfx_hid::OpenNode`, `hid_open_path` + `RegisterDevice`) happens only for a node
+whose descriptor already resolved to a known version, and only that one node. Reading
+sysfs first also breaks what would otherwise be a circular dependency: a design that opens
+first to determine the version could not demonstrate M2c's own exit criterion
+(`187c:0550` resolves to `API_V4`) without root, since the udev rule that would make
+opening work non-root is M2d's, not M2c's.
 
 ## The transport core: `PrepareAndSend`
 
@@ -323,9 +378,11 @@ mentions: `hid_backend_linux.h` exposes `alienfx_hid::SetAllowAnyVendor`/`SetDry
 (`ALIENFX_ALLOW_ANY_VENDOR`/`ALIENFX_DRY_RUN`/`ALIENFX_HID_OUTPUT_MODE`) and overridable
 at runtime. `RegisterDevice(HANDLE, vid, pid)` is the registry the allowlist gate checks
 first, falling back to `hid_get_device_info()` (no I/O, cached on the handle at open
-time) when a handle wasn't registered — M2c's device-open path is the real, eventual
-caller of `RegisterDevice`; today only tests and `tests/support/dry_run_demo.cpp` call it
-directly, since M2b never opens a device itself.
+time) when a handle wasn't registered — `hid_enumerate_linux.cpp`'s `OpenNode` (M2c) is
+now the real production caller of `RegisterDevice`, immediately after a successful
+`hid_open_path()`; `tests/support/dry_run_demo.cpp` and various tests still call it
+directly too, for the same reason M2b needed to (it links the stub enumeration seam, not
+the real one — see `tests/CMakeLists.txt`).
 
 **This same seam is what splits M2a from M2b.** `AlienFX-SDK/AlienFX_SDK/hid_backend.h`
 declares exactly these six symbols (plus `Sleep`/`CloseHandle`) with signatures matching

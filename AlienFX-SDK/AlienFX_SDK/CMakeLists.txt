@@ -1,6 +1,6 @@
 # AlienFX-SDK/AlienFX_SDK -- the HID light SDK.
 #
-# Three targets, per Doc/linux_roadmap/02-build-system.md's per-target-file
+# Five targets, per Doc/linux_roadmap/02-build-system.md's per-target-file
 # convention (extend this one file rather than adding a second CMakeLists.txt):
 #
 #   alienfx_sdk_headers (INTERFACE, M1) -- AlienFX_SDK.h and alienfx-controls.h,
@@ -59,3 +59,40 @@ target_link_libraries(alienfx_hid_linux
     PUBLIC  alienfx::sdk_headers   # win_compat.h, HANDLE/BOOL/DWORD
     PRIVATE alienfx::warnings
             hidapi::include)       # headers only -- see the file comment above
+
+#   alienfx_hid_descriptor (STATIC, M2c) -- hid_report_descriptor.cpp, the HID
+#   report-descriptor parser Finding 1's fix depends on. Split into its own target,
+#   deliberately NOT folded into alienfx_hid_enum_linux below, for the same reason
+#   alienfx_hid_linux above is split off alienfx_sdk one level up: its test
+#   (tests/alienfx_sdk/report_descriptor_test.cpp) needs zero hidapi in its
+#   dependency graph, the same structural-cannot-open-a-device property M2a/M2b's
+#   tests already have. No dependency beyond alienfx::warnings -- this parser takes
+#   raw bytes in and a HidCaps out, nothing more.
+add_library(alienfx_hid_descriptor STATIC hid_report_descriptor.cpp)
+add_library(alienfx::hid_descriptor ALIAS alienfx_hid_descriptor)
+
+# Its own include directory only -- deliberately NOT alienfx::sdk_headers (which
+# would also pull in alienfx::compat/win_compat.h): this parser takes raw bytes in
+# and a HidCaps out, nothing Windows-compat-typed, and report_descriptor_test.cpp's
+# whole point is a dependency graph with nothing else in it.
+target_include_directories(alienfx_hid_descriptor PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+target_link_libraries(alienfx_hid_descriptor PRIVATE alienfx::warnings)
+
+#   alienfx_hid_enum_linux (STATIC, M2c) -- hid_enumerate_linux.cpp, the real
+#   implementation of hid_enumerate.h's seam (AlienFXProbeDevice/AlienFXInitialize's
+#   device-open path, deferred from M2b to M2c -- see that file's header comment).
+#   Same "linker supplies the seam" convention as alienfx_hid_linux above: links
+#   hidapi::include (headers only, never hidapi::hidraw itself) plus
+#   alienfx::hid_descriptor (the parser) and alienfx::hid_linux (for the shared
+#   alienfx_hid::IsKnownVendor vendor allowlist -- declared once in
+#   hid_backend_linux.h, not duplicated here).
+add_library(alienfx_hid_enum_linux STATIC hid_enumerate_linux.cpp)
+add_library(alienfx::hid_enum_linux ALIAS alienfx_hid_enum_linux)
+
+target_link_libraries(alienfx_hid_enum_linux
+    PUBLIC  alienfx::sdk_headers
+    PRIVATE alienfx::warnings
+            alienfx::hid_descriptor
+            alienfx::hid_linux
+            hidapi::include)

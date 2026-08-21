@@ -191,6 +191,12 @@ the C-extensions gotcha (defect 4, unflagged going in) did.
 
 ### M2c — Linux enumeration & detection
 
+**Status: done.** `hid_report_descriptor.{h,cpp}`, `hid_enumerate.h`,
+`hid_enumerate_linux.cpp`, and a rewritten Linux `#else` arm of
+`AlienFXProbeDevice`/`AlienFXInitialize` exist; `187c:0550` on the fork's test machine
+resolves to `API_V4`; 38 new tests pass alongside the 149 from M2a/M2b (187 total) across
+all 5 `CMakePresets.json` presets.
+
 **Goal**: replace SetupAPI device enumeration (`AlienFXProbeDevice`, `AlienFXInitialize`)
 with udev/hidraw enumeration — including the actual `hid_open_path()`/`hid_enumerate()`
 calls M2b deliberately left out, and a call to `alienfx_hid::RegisterDevice()`
@@ -207,9 +213,68 @@ a `case 33`** (hidraw `write(2)` still expects the leading report-ID byte on the
 asserts VID `0x187c` + parsed Report Count 33 → `API_V4`. First M2 sub-milestone that is
 **not** purely additive to `AlienFX_SDK.cpp` — add a row to
 [18-windows-verification.md](18-windows-verification.md).
-**Size**: ~300 lines (udev enumeration, the report-count fix, detection tests).
-**Risk**: low-medium — the fix itself is a one-line normalization, but enumeration
-replacement touches code with real device-safety consequences if done carelessly.
+
+**Design decision made during implementation, not in the original scoping**: detection
+reads a matched node's report descriptor from
+`/sys/class/hidraw/hidrawN/device/report_descriptor` (world-readable) rather than
+`hid_open_path()`-ing it first. Opening only happens for a node whose descriptor already
+resolved to a known version. Two reasons, discovered while implementing, not anticipated
+up front: (1) `hid_open_path` fails with `EACCES` on this machine's root-only hidraw nodes
+today (no udev rule until M2d), so a design that opens first cannot demonstrate this
+milestone's own exit criterion without root — a circular dependency on M2d that reading
+sysfs first avoids; (2) it means detection never opens hardware it has no business
+touching (five other, unrelated hidraw nodes exist on the test machine). This is safer
+than, not just different from, a literal SetupAPI port.
+
+**Two porting defects found and fixed while implementing this milestone** (mirroring
+M2b's own "defects found" writeup style):
+1. An HID report-descriptor field (`OutputReportByteLength`'s Windows-convention `+1`)
+   must be conditional on the report existing at all, not unconditional — an early draft's
+   unconditional `+1` would report length 1, not 0, for a collection with no Output report,
+   permanently breaking API_V5's `!length` detection condition rather than merely leaving
+   it blocked on Finding 2/M2e. Caught by `report_descriptor_test.cpp`'s
+   `NoOutputOrFeatureReportGivesZeroNotOne` case before it ever reached real code.
+2. `hid_enumerate_linux.cpp`'s `EACCES` diagnostic used `fwprintf`'s `%s` with a
+   caller-widened `std::wstring` for the device path; `%s` in a wide-format string
+   consumes a *narrow* `char*` (only `%ls` is wide), so the widened path's raw bytes were
+   misread as a one-character narrow string. Found by running `probe_demo` against real
+   hardware (`/dev/hidraw3`), where the diagnostic printed `at /` instead of
+   `at /dev/hidraw3` — golden-vector and unit tests don't exercise this stderr path at
+   all, since it only fires on a real `hid_open_path` failure. Fixed by passing the
+   already-narrow path directly to `%s`.
+
+**Real-hardware confirmation, not just golden-vector-green**: `probe_demo` run against
+this machine's actual `/dev/hidraw3` and `/dev/hidraw4` (not synthetic test data) reports
+`187c:0550` as `out=34 feat=0` (Finding 1's fix, confirmed live) and `0d62:3740` as
+`out=2 feat=8, usage=0x0001/0x0006` — the nonzero output length matches Finding 2's
+predicted shape exactly (a sibling boot-keyboard collection's LED report keeps the
+whole-node aggregate nonzero), and `feat=8` matches `local/test-machine.md`'s own
+prediction ("the feature report here is 7 bytes... 8 with its ID") to the byte. Also
+confirmed live: `hid_enumerate()` yields the boot-keyboard top-level collection's
+`usage`/`usagePage` (`0x0001`/`0x0006`, Generic Desktop/Keyboard) ahead of the vendor
+collection for that same composite device — see the note added to
+[04](04-alienfx-sdk-hid.md) by Finding 2.
+
+**Size**: ~1550 net lines, not ~300 — the original estimate assumed a one-line `case 33`
+fix and did not anticipate a standalone report-descriptor parser (with malformed-input
+hardening, since this parser, unlike Windows' preparsed-data API, is itself the trust
+boundary for kernel-supplied bytes) or a full test tier for it. Breakdown: ~340 lines
+across `hid_report_descriptor.{h,cpp}` and `hid_enumerate.{h}`/`hid_enumerate_linux.cpp`;
+~140 net lines in `AlienFX_SDK.cpp`'s `#else` arm (including restoring the `-Werror`
+suppression boundary around the new code, see below); ~150 lines of CMake; ~480 lines of
+new tests (`report_descriptor_test.cpp`, `detection_test.cpp`); ~150 lines of test-support
+stub/demo code (`stub_enumerate.{h,cpp}`, `probe_demo.cpp`).
+**Risk**: realized as low-medium, as scoped — the report-count fix itself stayed a small,
+well-tested normalization, but getting the surrounding enumeration code *safe* (never
+opening an unrelated device, never writing during detection, failing closed on a
+malformed descriptor rather than trusting a kernel-supplied length into a fixed stack
+buffer) took real design work, not just plumbing. One realized risk the original scoping
+didn't call out: `AlienFX_SDK.cpp:74-86`'s `#pragma GCC diagnostic push` (M1's suppression
+for upstream MSVC-authored patterns) spans the entire Linux `#else` arm this milestone
+rewrites — left as-is, ~60 lines of new fork-authored code would have silently compiled
+with `-Wextra`/`-Wsign-compare`/etc. suppressed, in the one sub-milestone explicitly
+flagged as having real device-safety consequences. Fixed by popping the suppression
+immediately before this arm's new code and re-opening it, unchanged, right after.
 
 ### M2d — API_V4 live hardware validation
 

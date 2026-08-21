@@ -97,17 +97,6 @@ void SeedFromEnvironmentOnce() {
 	});
 }
 
-// The five vendors any AlienFX-family light device is known to enumerate under --
-// see Doc/linux_roadmap/15-packaging-and-permissions.md and 04's detection table.
-bool IsKnownVendor(uint16_t vid) {
-	switch (vid) {
-	case 0x187c: case 0x0d62: case 0x0424: case 0x0461: case 0x04f2:
-		return true;
-	default:
-		return false;
-	}
-}
-
 DeviceInfo LookupDevice(HANDLE handle) {
 	{
 		std::lock_guard<std::mutex> lock(g_deviceMutex);
@@ -139,7 +128,7 @@ bool CheckAllowlist(HANDLE handle, const char* callName) {
 	if (g_allowAnyVendor)
 		return true;
 	const DeviceInfo info = LookupDevice(handle);
-	if (IsKnownVendor(info.vid))
+	if (alienfx_hid::IsKnownVendor(info.vid))
 		return true;
 	Sink() << "alienfx: refusing " << callName << " -- handle's vendor 0x" << std::hex
 	       << std::setw(4) << std::setfill('0') << info.vid << std::dec
@@ -181,6 +170,15 @@ void PrintDryRun(const char* callName, const uint8_t* data, unsigned length) {
 } // namespace
 
 namespace alienfx_hid {
+
+bool IsKnownVendor(uint16_t vid) {
+	switch (vid) {
+	case 0x187c: case 0x0d62: case 0x0424: case 0x0461: case 0x04f2:
+		return true;
+	default:
+		return false;
+	}
+}
 
 void RegisterDevice(HANDLE handle, uint16_t vid, uint16_t pid) {
 	std::lock_guard<std::mutex> lock(g_deviceMutex);

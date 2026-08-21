@@ -16,10 +16,11 @@ extern "C" {
 // directly (PrepareAndSend, GetDeviceStatus, WaitForReady/WaitForBusy, ~Functions).
 // See Doc/linux_roadmap/04-alienfx-sdk-hid.md, "This same seam is what splits M2a
 // from M2b": M2a links against tests/support/fake_hid.cpp (records calls, no
-// device); M2b adds the real hidapi-hidraw implementation. Device enumeration
-// (AlienFXProbeDevice/AlienFXInitialize, below) and SetupAPI are unrelated to this
-// seam and stay deferred to M2c.
+// device); M2b adds the real hidapi-hidraw implementation.
 #include "hid_backend.h"
+// M2c: device enumeration/detection (AlienFXProbeDevice/AlienFXInitialize, below) is
+// a separate seam from hid_backend.h above -- see hid_enumerate.h's file comment.
+#include "hid_enumerate.h"
 #include <cstring> // memset/memcpy (PrepareAndSend) -- pulled in transitively by
                     // <hidsdi.h>/<SetupAPI.h> on the Windows arm above
 #endif
@@ -338,24 +339,134 @@ namespace AlienFX_SDK {
 		return version != API_UNKNOWN;
 	}
 #else
-	// TODO(M2c): udev/hidraw enumeration + detection, including the fix for the
-	// 33-vs-34 report-length off-by-one (Doc/linux_roadmap/local/test-machine.md,
-	// "Finding 1" -- Linux HID report descriptors don't include the leading
-	// report-ID byte Windows' OutputReportByteLength counts).
-	bool Functions::AlienFXProbeDevice(void* hDevInfo, void* devData, WORD vidd, WORD pidd) {
-		(void)hDevInfo; (void)devData; (void)vidd; (void)pidd;
+	// M2c: udev/hidraw enumeration + detection over alienfx_hid::EnumerateNodes/
+	// OpenNode (hid_enumerate.h). Fixes Finding 1
+	// (Doc/linux_roadmap/local/test-machine.md: "a 33-vs-34 off-by-one makes the
+	// light controller undetectable") -- Linux HID report descriptors don't include
+	// the leading report-ID byte Windows' OutputReportByteLength counts, so
+	// hid_report_descriptor.cpp normalizes the parsed length to that convention
+	// before HidCaps ever reaches this switch. The switch below is otherwise
+	// byte-for-byte the same as the Windows arm above; only where the caps come
+	// from differs.
+	//
+	// New fork-authored logic from here to this arm's #endif is intentionally
+	// OUTSIDE the `#pragma GCC diagnostic` suppression above (:74-86; scoped by its
+	// own comment to upstream MSVC-authored patterns being compiled as-is, not new
+	// code) -- pop it here, and re-open the identical suppression right after this
+	// arm's #endif, so neither the Windows arm above nor the upstream-authored
+	// `Functions`/`Mappings` code below this arm changes which warnings apply to it.
+	#pragma GCC diagnostic pop
+
+	bool Functions::AlienFXProbeDevice(void* /*hDevInfo*/, void* devData, WORD vidd, WORD pidd) {
 		version = API_UNKNOWN;
-		return false;
+		const auto* node = static_cast<const alienfx_hid::HidNode*>(devData);
+		if (!node || !node->caps.has_value())
+			return false;
+		if ((vidd && node->vid != vidd) || (pidd && node->pid != pidd))
+			return false;
+
+		length = node->caps->outputReportByteLength;
+		pid = node->pid;
+		switch (vid = node->vid) {
+		case 0x0d62: // Darfon
+			if (node->usage == 0xcc && !length) {
+				length = node->caps->featureReportByteLength;
+				version = API_V5;
+			}
+			break;
+		case 0x187c: // Alienware
+			switch (length) {
+			case 9:  version = API_V2; break;
+			case 12: version = API_V3; break;
+			case 34: version = API_V4; break;
+			case 65: version = API_V6; break;
+			}
+			break;
+		default:
+			if (length == 65)
+				switch (vid) {
+				case 0x0424: // Microchip
+					if (pid != 0x274c)
+						version = API_V6;
+					break;
+				case 0x0461: version = API_V7; break; // Primax
+				case 0x04f2: version = API_V8; break; // Chicony
+				}
+		}
+
+		if (version == API_UNKNOWN)
+			return false;
+
+		devHandle = alienfx_hid::OpenNode(*node);
+		if (!devHandle) {
+			// Ordering hazard: Windows opens the device first and decides the
+			// version second, so a matched version there always implies an open
+			// handle. This design inverts that order (see
+			// hid_enumerate_linux.cpp's file comment for why), so a version that
+			// matched but then failed to open -- EACCES on a root-only node, before
+			// M2d's udev rule exists -- must roll `version` back to API_UNKNOWN
+			// rather than leave a half-set state: ~Functions (below) unconditionally
+			// calls CloseHandle(devHandle) whenever version != API_UNKNOWN, which
+			// would otherwise close a handle that was never opened.
+			version = API_UNKNOWN;
+			return false;
+		}
+
+		description = node->description;
+		// No SetCommTimeouts equivalent here -- that call isn't part of the
+		// hid_backend.h transport seam at all. hid_backend_linux.cpp's
+		// kReadTimeoutMs (100ms) already mirrors its effect; this omission is
+		// deliberate, not a gap.
+		return true;
 	}
 
 	//Use this method for general devices, vid = 0 for any vid, pid = 0 for any pid.
-	// TODO(M2c): udev/hidraw enumeration.
 	bool Functions::AlienFXInitialize(WORD vidd, WORD pidd) {
-		(void)vidd; (void)pidd;
-		devHandle = NULL;
+		// Close a previously-opened handle before re-initializing. Windows sets
+		// devHandle = NULL here unconditionally, which on Windows is only an fd
+		// leak -- on Linux it's worse: hid_backend_linux.cpp's device registry is
+		// keyed on the raw hid_device*, and hidapi can hand the same pointer back on
+		// a later hid_open_path, so a leaked handle would leave a stale
+		// allowlist-registry entry a later, unrelated device could inherit. A
+		// deliberate Linux-specific divergence from the Windows arm above, not a
+		// silent behavior change.
+		if (devHandle)
+			CloseHandle(devHandle);
+		devHandle = nullptr;
+		// Also resets `version` up front, unlike the Windows arm above (which relies
+		// entirely on AlienFXProbeDevice's own `version = API_UNKNOWN;` to do this,
+		// and so never resets it when the enumeration loop calls ProbeDevice zero
+		// times). AlienFXProbeDevice below does the same reset on every call it
+		// makes, so this line only changes behavior for the zero-candidates case --
+		// where it fixes returning a stale, possibly-wrong `true` from a previous
+		// call instead of the correct `false`.
 		version = API_UNKNOWN;
-		return false;
+
+		vector<alienfx_hid::HidNode> nodes;
+		if (!alienfx_hid::EnumerateNodes(&nodes, vidd, pidd))
+			return false;
+
+		// Unlike the Windows loop above (whose `&&`-chained loop condition aborts
+		// the whole scan on one non-SPINT_ACTIVE interface), this loop skips a
+		// candidate that fails to probe or open and keeps going -- a deliberate
+		// behavior difference, not an oversight.
+		for (auto& node : nodes)
+			if (AlienFXProbeDevice(nullptr, &node, vidd, pidd))
+				break;
+
+		return version != API_UNKNOWN;
 	}
+
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+	#pragma GCC diagnostic ignored "-Wsign-compare"
+	#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+	#pragma GCC diagnostic ignored "-Wextra"
+	#ifdef __clang__
+	#pragma GCC diagnostic ignored "-Wundefined-bool-conversion"
+	#else
+	#pragma GCC diagnostic ignored "-Wnonnull-compare"
+	#endif
 #endif
 
 #ifndef NOACPILIGHTS

@@ -23,6 +23,13 @@
 
 namespace alienfx_hid {
 
+// The five vendors any AlienFX-family light device is known to enumerate under. Also
+// the pre-open filter M2c's hid_enumerate_linux.cpp applies -- declared here, not
+// duplicated, so the write-path allowlist below and the enumeration-time filter can
+// never drift apart. See Doc/linux_roadmap/15-packaging-and-permissions.md and doc
+// 04's detection table for the same list.
+bool IsKnownVendor(uint16_t vid);
+
 // --- Device registry, see the file comment above. ---------------------------
 void RegisterDevice(HANDLE handle, uint16_t vid, uint16_t pid);
 void ForgetDevice(HANDLE handle);

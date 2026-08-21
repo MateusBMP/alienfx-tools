@@ -19,6 +19,7 @@ tests/
   kiss_fft/                   # M0 (test source deferred to a follow-up pass)
   alienfx_sdk/                # M2a — packet_builder_test.cpp, protocol_invariants_test.cpp
                                # M2b — transport_backend_test.cpp
+                               # M2c — report_descriptor_test.cpp, detection_test.cpp
   golden/alienfx_sdk/         # M2a — golden byte vectors, see below (shared by M2a and M2b)
   support/                    # M2a — transport_log (TransportKind/TransportEvent, shared by
                                #       both fakes below), fake_hid (recording transport for
@@ -28,6 +29,10 @@ tests/
                                # M2b — fake_hidapi (recording transport for the *hidapi* C
                                #       API instead — the seam hid_backend_linux.cpp calls),
                                #       dry_run_demo (hand-run --dry-run demonstration)
+                               # M2c — stub_enumerate (scripted stub for
+                               #       hid_enumerate.h's seam, the enumeration-side
+                               #       counterpart to fake_hid/fake_hidapi), probe_demo
+                               #       (hand-run real-enumeration demonstration)
 ```
 
 One flat `tests/CMakeLists.txt` declares every test executable — the *source* tree
